@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use futures::future::BoxFuture;
 
 use clap::Parser;
+use std::str::FromStr;
 
 fn get_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdUdpSocket>>, addr: &Uri) -> DatagramRemoteEndpoint<AllowStdUdpSocket> {
     local_endpoint
@@ -31,6 +32,26 @@ fn get_multicast_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<Allo
 fn get_addr_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdUdpSocket>>, addr: &str) -> DatagramRemoteEndpoint<AllowStdUdpSocket> {
     let uri = String::new() + "coap://[" + addr + "]";
     get_remote_endpoint(&local_endpoint, Uri::from_str(&uri).unwrap())
+}
+
+fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
+    fn service_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
+        let data : BTreeMap<String, BTreeMap<String, String>> = serde_cbor::from_slice(context.unwrap().message().payload()).unwrap();
+        for (service, details) in data.iter() {
+            println!("{}: {:?}: {}", service, details.get("type"), context.unwrap().remote_socket_addr());
+        }
+
+        Ok(ResponseStatus::Continue)
+    }
+
+    let future_result = remote_endpoint.send_to(
+        rel_ref!("sd"),
+        CoapRequest::get()
+            .multicast()
+            .use_handler(service_finder) 
+        );
+
+    future_result
 }
 
 fn search_not_provisioned(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
@@ -77,14 +98,27 @@ struct Opts {
 
 #[derive(Parser,Debug)]
 enum SubCommand {
+    ServiceDiscovery,
     NotProvisioned,
     Provision(Prov),
     ResetProvisioning(ProvKey),
 }
 
-enum ProvVal {
-    String(String),
-    Int(i32),
+#[derive(Debug)]
+enum ProvType {
+    StringType,
+    IntType,
+}
+
+impl FromStr for ProvType {
+    type Err = clap::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "int" => Ok(ProvType::IntType),
+            "str" => Ok(ProvType::StringType),
+            _ => Err(clap::Error::with_description("Unknown error type. Use int or str".to_string(), clap::ErrorKind::InvalidValue)),
+        }
+    }
 }
 
 #[derive(Parser,Debug)]
@@ -95,6 +129,8 @@ struct Prov {
     key: String,
     #[clap(short, long)]
     value: String,
+    #[clap(short='t', default_value = "str")]
+    value_type: ProvType,
 }
 
 #[derive(Parser,Debug)]
@@ -129,24 +165,48 @@ fn main() {
         );
 
     match opts.subcmd {
+        SubCommand::ServiceDiscovery => {
+            let remote_endpoint = get_multicast_remote_endpoint(&local_endpoint);
+            let future_result = search_services(&remote_endpoint);
+            let result = pool.run_until(future_result);
+        }
+
         SubCommand::NotProvisioned => {
             let remote_endpoint = get_multicast_remote_endpoint(&local_endpoint);
             let future_result = search_not_provisioned(&remote_endpoint);
             let result = pool.run_until(future_result);
         }
+
         SubCommand::Provision(prov) => {
             let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &prov.addr);
-            let mut data = BTreeMap::new();
-            data.insert(prov.key, prov.value);
+            let mut data_str = BTreeMap::new();
+            let mut data_int = BTreeMap::new();
+            let future_result;
 
-            let future_result = post_data(&remote_endpoint, |msg_wrt| {
-                msg_wrt.set_msg_code(MsgCode::MethodPost);
-                serde_cbor::to_writer(msg_wrt, &data);
-                Ok(())
-            });
+            match prov.value_type {
+                ProvType::StringType => {
+                    data_str.insert(prov.key, prov.value);
+
+                    future_result = post_data(&remote_endpoint, |msg_wrt| {
+                        msg_wrt.set_msg_code(MsgCode::MethodPost);
+                        serde_cbor::to_writer(msg_wrt, &data_str);
+                        Ok(())
+                    });
+                }
+                ProvType::IntType => {
+                    data_int.insert(prov.key, prov.value.parse::<i32>().unwrap());
+
+                    future_result = post_data(&remote_endpoint, |msg_wrt| {
+                        msg_wrt.set_msg_code(MsgCode::MethodPost);
+                        serde_cbor::to_writer(msg_wrt, &data_int);
+                        Ok(())
+                    });
+                }
+            }
 
             let result = pool.run_until(future_result);
         }
+
         SubCommand::ResetProvisioning(prov) => {
             let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &prov.addr);
             let mut data = BTreeMap::new();
