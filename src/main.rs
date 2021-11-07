@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures::{prelude::*,executor::LocalPool,task::LocalSpawnExt};
 use async_coap::prelude::*;
 use async_coap::datagram::{DatagramLocalEndpoint,AllowStdUdpSocket,DatagramRemoteEndpoint};
-use async_coap::uri::Uri;
+use async_coap::uri::{Uri, RelRef};
 
 use async_coap::Error;
 use async_coap::InboundContext;
@@ -74,12 +74,12 @@ fn search_not_provisioned(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSo
     future_result
 }
 
-fn post_data<'a, F>(remote_endpoint: &'a DatagramRemoteEndpoint<AllowStdUdpSocket>, writer: F) -> BoxFuture<'a, Result<OwnedImmutableMessage, Error>> 
+fn post_data<'a, F>(remote_endpoint: &'a DatagramRemoteEndpoint<AllowStdUdpSocket>, path: &'a RelRef, writer: F) -> BoxFuture<'a, Result<OwnedImmutableMessage, Error>> 
     where
     F: 'a + Fn(&mut dyn MessageWrite) -> Result<(), Error> + Send + std::marker::Sync,
 {
     let future_result = remote_endpoint.send_to(
-        rel_ref!("prov"),
+        path,
         CoapRequest::post()
             .content_format(ContentFormat::APPLICATION_CBOR)
             .payload_writer(writer)
@@ -102,20 +102,21 @@ enum SubCommand {
     NotProvisioned,
     Provision(Prov),
     ResetProvisioning(ProvKey),
+    Set(CoapSetter),
 }
 
 #[derive(Debug)]
-enum ProvType {
+enum ValType {
     StringType,
     IntType,
 }
 
-impl FromStr for ProvType {
+impl FromStr for ValType {
     type Err = clap::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "int" => Ok(ProvType::IntType),
-            "str" => Ok(ProvType::StringType),
+            "int" => Ok(ValType::IntType),
+            "str" => Ok(ValType::StringType),
             _ => Err(clap::Error::with_description("Unknown error type. Use int or str".to_string(), clap::ErrorKind::InvalidValue)),
         }
     }
@@ -130,7 +131,7 @@ struct Prov {
     #[clap(short, long)]
     value: String,
     #[clap(short='t', default_value = "str")]
-    value_type: ProvType,
+    value_type: ValType,
 }
 
 #[derive(Parser,Debug)]
@@ -139,6 +140,20 @@ struct ProvKey {
     addr: String,
     #[clap(short, long)]
     key: String,
+}
+
+#[derive(Parser,Debug)]
+struct CoapSetter {
+    #[clap(short, long)]
+    addr: String,
+    #[clap(short, long)]
+    resource: String,
+    #[clap(short, long)]
+    key: String,
+    #[clap(short, long)]
+    value: String,
+    #[clap(short='t', default_value = "str")]
+    value_type: ValType,
 }
 
 fn main() {
@@ -184,19 +199,19 @@ fn main() {
             let future_result;
 
             match prov.value_type {
-                ProvType::StringType => {
+                ValType::StringType => {
                     data_str.insert(prov.key, prov.value);
 
-                    future_result = post_data(&remote_endpoint, |msg_wrt| {
+                    future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
                         msg_wrt.set_msg_code(MsgCode::MethodPost);
                         serde_cbor::to_writer(msg_wrt, &data_str);
                         Ok(())
                     });
                 }
-                ProvType::IntType => {
+                ValType::IntType => {
                     data_int.insert(prov.key, prov.value.parse::<i32>().unwrap());
 
-                    future_result = post_data(&remote_endpoint, |msg_wrt| {
+                    future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
                         msg_wrt.set_msg_code(MsgCode::MethodPost);
                         serde_cbor::to_writer(msg_wrt, &data_int);
                         Ok(())
@@ -212,11 +227,45 @@ fn main() {
             let mut data = BTreeMap::new();
             data.insert(prov.key, "");
 
-            let future_result = post_data(&remote_endpoint, |msg_wrt| {
+            let future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
                 msg_wrt.set_msg_code(MsgCode::MethodPost);
                 serde_cbor::to_writer(msg_wrt, &data);
                 Ok(())
             });
+
+            let result = pool.run_until(future_result);
+        }
+
+        SubCommand::Set(data) => {
+            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
+            let mut data_str = BTreeMap::new();
+            let mut data_int = BTreeMap::new();
+            let future_result;
+
+            match data.value_type {
+                ValType::StringType => {
+                    data_str.insert(data.key, data.value);
+
+                    future_result = post_data(&remote_endpoint,
+                                              RelRef::from_str(&data.resource).unwrap(),
+                                              |msg_wrt| {
+                        msg_wrt.set_msg_code(MsgCode::MethodPost);
+                        serde_cbor::to_writer(msg_wrt, &data_str);
+                        Ok(())
+                    });
+                }
+                ValType::IntType => {
+                    data_int.insert(data.key, data.value.parse::<i32>().unwrap());
+
+                    future_result = post_data(&remote_endpoint,
+                                              RelRef::from_str(&data.resource).unwrap(),
+                                              |msg_wrt| {
+                        msg_wrt.set_msg_code(MsgCode::MethodPost);
+                        serde_cbor::to_writer(msg_wrt, &data_int);
+                        Ok(())
+                    });
+                }
+            }
 
             let result = pool.run_until(future_result);
         }
