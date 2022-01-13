@@ -19,6 +19,8 @@ use futures::future::BoxFuture;
 use clap::Parser;
 use std::str::FromStr;
 
+use std::fmt::Write;
+
 fn get_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdUdpSocket>>, addr: &Uri) -> DatagramRemoteEndpoint<AllowStdUdpSocket> {
     local_endpoint
         .remote_endpoint_from_uri(addr)
@@ -104,6 +106,7 @@ enum SubCommand {
     ResetProvisioning(ProvKey),
     Get(CoapGetter),
     Set(CoapSetter),
+    FotaReq(CoapFotaReq),
 }
 
 #[derive(Debug)]
@@ -163,6 +166,12 @@ struct CoapSetter {
     value: String,
     #[clap(short='t', default_value = "str")]
     value_type: ValType,
+}
+
+#[derive(Parser,Debug)]
+struct CoapFotaReq {
+    #[clap(short, long)]
+    addr: String,
 }
 
 fn main() {
@@ -299,6 +308,43 @@ fn main() {
                     });
                 }
             }
+
+            let result = pool.run_until(future_result);
+        }
+
+        SubCommand::FotaReq(data) => {
+            let mut local_addr_opt = None;
+
+            for iface in pnet::datalink::interfaces() {
+                for ip in iface.ips {
+                    if let ipnetwork::IpNetwork::V6(network) = ip {
+                        if network.prefix() < 128 && (network.ip().octets()[0] & 0xe0 == 0x20) {
+                            local_addr_opt = Some(network.ip());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let local_addr = local_addr_opt.expect("Local IPv6 address not found");
+            let payload = format!("coap://[{}]/fota", local_addr);
+
+            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
+            let future_result = remote_endpoint.send_to(
+                RelRef::from_str("fota_req").unwrap(),
+                CoapRequest::post()
+                    .content_format(ContentFormat::TEXT_PLAIN_UTF8)
+                    .payload_writer(|msg_wrt| { 
+                        msg_wrt.clear();
+                        msg_wrt.set_msg_type(MsgType::Con);
+                        msg_wrt.set_msg_code(MsgCode::MethodPost);
+                        msg_wrt.set_msg_token(MsgToken::EMPTY);
+                        msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, "fota_req");
+                        msg_wrt.write_str(&payload).unwrap();
+                        Ok(())
+                    })
+                    .emit_successful_response()
+                );
 
             let result = pool.run_until(future_result);
         }
