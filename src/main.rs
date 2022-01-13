@@ -268,8 +268,26 @@ fn main() {
                         Ok(())
                     })
                     .use_handler(|context| {
-                        let data : serde_cbor::Value = serde_cbor::from_slice(context.unwrap().message().payload()).unwrap();
-                        println!("Data: {:?}", data);
+                        let msg_read = context.unwrap().message();
+
+                        for opt in msg_read.options() {
+                            match opt {
+                                Ok((async_coap::option::OptionNumber::CONTENT_FORMAT, cnt_fmt)) => {
+                                    match cnt_fmt {
+                                        [] => {
+                                            let data = std::str::from_utf8(msg_read.payload()).unwrap();
+                                            println!("Data: {}", data);
+                                        }
+                                        [60] => {
+                                            let data : serde_cbor::Value = serde_cbor::from_slice(msg_read.payload()).unwrap();
+                                            println!("Data: {:?}", data);
+                                        }
+                                        _ => println!("Unknown content format"),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
 
                         Ok(ResponseStatus::Done(()))
                     })
