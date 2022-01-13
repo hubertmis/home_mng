@@ -102,6 +102,7 @@ enum SubCommand {
     NotProvisioned,
     Provision(Prov),
     ResetProvisioning(ProvKey),
+    Get(CoapGetter),
     Set(CoapSetter),
 }
 
@@ -140,6 +141,14 @@ struct ProvKey {
     addr: String,
     #[clap(short, long)]
     key: String,
+}
+
+#[derive(Parser,Debug)]
+struct CoapGetter {
+    #[clap(short, long)]
+    addr: String,
+    #[clap(short, long)]
+    resource: String,
 }
 
 #[derive(Parser,Debug)]
@@ -232,6 +241,30 @@ fn main() {
                 serde_cbor::to_writer(msg_wrt, &data);
                 Ok(())
             });
+
+            let result = pool.run_until(future_result);
+        }
+
+        SubCommand::Get(data) => {
+            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
+            let future_result = remote_endpoint.send_to(
+                RelRef::from_str(&data.resource).unwrap(),
+                CoapRequest::get()
+                    .payload_writer(|msg_wrt| {
+                        msg_wrt.clear();
+                        msg_wrt.set_msg_type(MsgType::Con);
+                        msg_wrt.set_msg_code(MsgCode::MethodGet);
+                        msg_wrt.set_msg_token(MsgToken::EMPTY);
+                        msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, &data.resource);
+                        Ok(())
+                    })
+                    .use_handler(|context| {
+                        let data : serde_cbor::Value = serde_cbor::from_slice(context.unwrap().message().payload()).unwrap();
+                        println!("Data: {:?}", data);
+
+                        Ok(ResponseStatus::Done(()))
+                    })
+                );
 
             let result = pool.run_until(future_result);
         }
