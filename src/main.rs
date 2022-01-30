@@ -35,7 +35,8 @@ fn get_addr_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdU
     get_remote_endpoint(&local_endpoint, Uri::from_str(&uri).unwrap())
 }
 
-fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
+fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>,
+                   srv_name: Option<String>, srv_type: Option<String>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
     fn service_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
         let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
         for (service, details) in data.iter() {
@@ -45,14 +46,35 @@ fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) 
         Ok(ResponseStatus::Continue)
     }
 
-    let future_result = remote_endpoint.send_to(
-        rel_ref!("sd"),
-        CoapRequest::get()
-            .multicast()
-            .use_handler(service_finder) 
-        );
-
-    future_result
+    if srv_name.is_some() || srv_type.is_some() {
+        remote_endpoint.send_to(
+            rel_ref!("sd"),
+            CoapRequest::get()
+                .multicast()
+                .content_format(ContentFormat::APPLICATION_CBOR)
+                .payload_writer(move |msg_wrt| {
+                            let mut data = BTreeMap::new();
+                            if let Some(srv_name) = &srv_name {
+                                data.insert("name", srv_name);
+                            }
+                            if let Some(srv_type) = &srv_type {
+                                data.insert("type", srv_type);
+                            }
+                            msg_wrt.set_msg_type(MsgType::Non);
+                            msg_wrt.set_msg_code(MsgCode::MethodGet);
+                            ciborium::ser::into_writer(&data, msg_wrt);
+                            Ok(())
+                })
+                .use_handler(service_finder)
+            )
+    } else {
+        remote_endpoint.send_to(
+            rel_ref!("sd"),
+            CoapRequest::get()
+                .multicast()
+                .use_handler(service_finder)
+            )
+    }
 }
 
 fn search_not_provisioned(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
@@ -99,7 +121,7 @@ struct Opts {
 
 #[derive(Parser,Debug)]
 enum SubCommand {
-    ServiceDiscovery,
+    ServiceDiscovery(SdFilter),
     NotProvisioned,
     Provision(Prov),
     ResetProvisioning(ProvKey),
@@ -127,6 +149,14 @@ impl FromStr for ValType {
             _ => Err(clap::Error::with_description("Unknown error type. Use int or str".to_string(), clap::ErrorKind::InvalidValue)),
         }
     }
+}
+
+#[derive(Parser,Debug)]
+struct SdFilter {
+    #[clap(short = 'n', long)]
+    service_name: Option<String>,
+    #[clap(short = 't', long)]
+    service_type: Option<String>,
 }
 
 #[derive(Parser,Debug)]
@@ -203,9 +233,9 @@ fn main() {
         );
 
     match opts.subcmd {
-        SubCommand::ServiceDiscovery => {
+        SubCommand::ServiceDiscovery(sd_filter) => {
             let remote_endpoint = get_multicast_remote_endpoint(&local_endpoint);
-            let future_result = search_services(&remote_endpoint);
+            let future_result = search_services(&remote_endpoint, sd_filter.service_name, sd_filter.service_type);
             let result = pool.run_until(future_result);
         }
 
