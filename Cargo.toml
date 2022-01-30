@@ -10,7 +10,7 @@ license = "MIT"
 async-coap = { git = "https://github.com/google/rust-async-coap.git", ref = "71245d4" }
 futures = "0.3"
 socket2 = "0.4"
-serde_cbor = "0.10"
+ciborium = "0.2"
 clap = "3.0.0-beta.5"
 pnet = "0.28"
 ipnetwork = "0.18"

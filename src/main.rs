@@ -12,7 +12,6 @@ use async_coap::message::{OwnedImmutableMessage, MessageWrite};
 
 use std::time::{Duration, SystemTime};
 
-use serde_cbor;
 use std::collections::BTreeMap;
 use futures::future::BoxFuture;
 
@@ -38,7 +37,7 @@ fn get_addr_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdU
 
 fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
     fn service_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
-        let data : BTreeMap<String, BTreeMap<String, String>> = serde_cbor::from_slice(context.unwrap().message().payload()).unwrap();
+        let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
         for (service, details) in data.iter() {
             println!("{}: {:?}: {}", service, details.get("type"), context.unwrap().remote_socket_addr());
         }
@@ -58,7 +57,7 @@ fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) 
 
 fn search_not_provisioned(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
     fn not_prov_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
-        let data : BTreeMap<String, BTreeMap<String, String>> = serde_cbor::from_slice(context.unwrap().message().payload()).unwrap();
+        let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
         if data.len() == 0 {
             println!("Addr: {}", context.unwrap().remote_socket_addr());
         }
@@ -113,6 +112,8 @@ enum SubCommand {
 enum ValType {
     StringType,
     IntType,
+    BinType,
+    RgbwType,
 }
 
 impl FromStr for ValType {
@@ -121,6 +122,8 @@ impl FromStr for ValType {
         match s {
             "int" => Ok(ValType::IntType),
             "str" => Ok(ValType::StringType),
+            "bin" => Ok(ValType::BinType),
+            "rgbw" => Ok(ValType::RgbwType),
             _ => Err(clap::Error::with_description("Unknown error type. Use int or str".to_string(), clap::ErrorKind::InvalidValue)),
         }
     }
@@ -166,6 +169,8 @@ struct CoapSetter {
     value: String,
     #[clap(short='t', default_value = "str")]
     value_type: ValType,
+    #[clap(short='e')]
+    exp_rsp: bool,
 }
 
 #[derive(Parser,Debug)]
@@ -222,7 +227,7 @@ fn main() {
 
                     future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
                         msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        serde_cbor::to_writer(msg_wrt, &data_str);
+                        ciborium::ser::into_writer(&data_str, msg_wrt);
                         Ok(())
                     });
                 }
@@ -231,9 +236,15 @@ fn main() {
 
                     future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
                         msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        serde_cbor::to_writer(msg_wrt, &data_int);
+                        ciborium::ser::into_writer(&data_int, msg_wrt);
                         Ok(())
                     });
+                }
+                ValType::BinType => {
+                    return;
+                }
+                ValType::RgbwType => {
+                    return;
                 }
             }
 
@@ -247,7 +258,7 @@ fn main() {
 
             let future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
                 msg_wrt.set_msg_code(MsgCode::MethodPost);
-                serde_cbor::to_writer(msg_wrt, &data);
+                ciborium::ser::into_writer(&data, msg_wrt);
                 Ok(())
             });
 
@@ -279,7 +290,7 @@ fn main() {
                                             println!("Data: {}", data);
                                         }
                                         [60] => {
-                                            let data : serde_cbor::Value = serde_cbor::from_slice(msg_read.payload()).unwrap();
+                                            let data : ciborium::value::Value = ciborium::de::from_reader(msg_read.payload()).unwrap();
                                             println!("Data: {:?}", data);
                                         }
                                         _ => println!("Unknown content format"),
@@ -298,34 +309,81 @@ fn main() {
 
         SubCommand::Set(data) => {
             let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
-            let mut data_str = BTreeMap::new();
-            let mut data_int = BTreeMap::new();
-            let future_result;
+            let mut data_map: BTreeMap<&str, ciborium::value::Value> = BTreeMap::new();
+            let mut bin_vec: Vec<u8> = Vec::new();
+
+            if data.exp_rsp {
+                data_map.insert("ersp", ciborium::value::Value::Bool(true));
+            }
 
             match data.value_type {
                 ValType::StringType => {
-                    data_str.insert(data.key, data.value);
+                    data_map.insert(&data.key, ciborium::value::Value::Text(data.value));
 
-                    future_result = post_data(&remote_endpoint,
-                                              RelRef::from_str(&data.resource).unwrap(),
-                                              |msg_wrt| {
-                        msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        serde_cbor::to_writer(msg_wrt, &data_str);
-                        Ok(())
-                    });
                 }
                 ValType::IntType => {
-                    data_int.insert(data.key, data.value.parse::<i32>().unwrap());
+                    data_map.insert(&data.key, ciborium::value::Value::Integer(
+                            ciborium::value::Integer::from(
+                                data.value.parse::<i32>().unwrap()
+                                )
+                            ));
+                }
+                ValType::BinType => {
+                    bin_vec = data.value
+                        .chars()
+                        .collect::<Vec<char>>()
+                        .chunks(2)
+                        .map(|c| c.iter().collect::<String>())
+                        .map(|c| u8::from_str_radix(&c, 16).unwrap())
+                        .collect::<Vec<u8>>();
 
-                    future_result = post_data(&remote_endpoint,
-                                              RelRef::from_str(&data.resource).unwrap(),
-                                              |msg_wrt| {
-                        msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        serde_cbor::to_writer(msg_wrt, &data_int);
-                        Ok(())
-                    });
+                    data_map.insert(&data.key, ciborium::value::Value::Bytes(bin_vec));
+                }
+                ValType::RgbwType => {
+                    #[derive(Debug)]
+                    struct RgbwValues {
+                        r: u16,
+                        g: u16,
+                        b: u16,
+                        w: u16,
+                        d: u16,
+                    };
+                    impl std::str::FromStr for RgbwValues {
+                        type Err = String;
+                        fn from_str(value: &str) -> Result<Self, Self::Err> {
+                            if value.len() != 10 { return Err("Invalid string length".to_string()); }
+
+                            let val = value
+                                .chars()
+                                .collect::<Vec<char>>()
+                                .chunks(2)
+                                .map(|c| c.iter().collect::<String>())
+                                .collect::<Vec<String>>();
+                            Ok(RgbwValues {
+                                r: u16::from_str_radix(&val[0], 16).unwrap(),
+                                g: u16::from_str_radix(&val[1], 16).unwrap(),
+                                b: u16::from_str_radix(&val[2], 16).unwrap(),
+                                w: u16::from_str_radix(&val[3], 16).unwrap(),
+                                d: u16::from_str_radix(&val[4], 16).unwrap(),
+                            })
+                        }
+                    }
+                    let input: RgbwValues = data.value.parse().unwrap();
+                    data_map.insert("r", ciborium::value::Value::Integer(ciborium::value::Integer::from(input.r)));
+                    data_map.insert("g", ciborium::value::Value::Integer(ciborium::value::Integer::from(input.g)));
+                    data_map.insert("b", ciborium::value::Value::Integer(ciborium::value::Integer::from(input.b)));
+                    data_map.insert("w", ciborium::value::Value::Integer(ciborium::value::Integer::from(input.w)));
+                    data_map.insert("d", ciborium::value::Value::Integer(ciborium::value::Integer::from(input.d * 100)));
                 }
             }
+
+            let future_result = post_data(&remote_endpoint,
+                                          RelRef::from_str(&data.resource).unwrap(),
+                                          |msg_wrt| {
+                msg_wrt.set_msg_code(MsgCode::MethodPost);
+                ciborium::ser::into_writer(&data_map, msg_wrt);
+                Ok(())
+            });
 
             let result = pool.run_until(future_result);
         }
