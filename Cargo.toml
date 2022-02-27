@@ -11,6 +11,6 @@ async-coap = { git = "https://github.com/google/rust-async-coap.git", ref = "712
 futures = "0.3"
 socket2 = "0.4"
 ciborium = "0.2"
-clap = "3.0.0-beta.5"
+clap = { version = "3.0.0", features = ["derive"] }
 pnet = "0.28"
 ipnetwork = "0.18"
