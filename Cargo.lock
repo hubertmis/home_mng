@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "async-coap"
 version = "0.1.0"
-source = "git+https://github.com/google/rust-async-coap.git#71245d49449b2534b12dff75e84611967c009b29"
+source = "git+https://github.com/google/rust-async-coap.git?rev=71245d4#71245d49449b2534b12dff75e84611967c009b29"
 dependencies = [
  "async-coap-uri",
  "futures",
@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "async-coap-uri"
 version = "0.1.0"
-source = "git+https://github.com/google/rust-async-coap.git#71245d49449b2534b12dff75e84611967c009b29"
+source = "git+https://github.com/google/rust-async-coap.git?rev=71245d4#71245d49449b2534b12dff75e84611967c009b29"
 dependencies = [
  "async-coap-uri-macros",
  "lazy_static",
@@ -40,7 +40,7 @@ dependencies = [
 [[package]]
 name = "async-coap-uri-macros"
 version = "0.1.0"
-source = "git+https://github.com/google/rust-async-coap.git#71245d49449b2534b12dff75e84611967c009b29"
+source = "git+https://github.com/google/rust-async-coap.git?rev=71245d4#71245d49449b2534b12dff75e84611967c009b29"
 dependencies = [
  "lazy_static",
  "proc-macro-hack",
