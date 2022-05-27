@@ -133,7 +133,6 @@ enum ValType {
     StringType,
     IntType,
     BinType,
-    RgbwType,
     BoolType,
 }
 
@@ -144,7 +143,6 @@ impl FromStr for ValType {
             "int" => Ok(ValType::IntType),
             "str" => Ok(ValType::StringType),
             "bin" => Ok(ValType::BinType),
-            "rgbw" => Ok(ValType::RgbwType),
             "bool" => Ok(ValType::BoolType),
             _ => Err(clap::Error::raw(clap::ErrorKind::InvalidValue, "Unknown value type. Use int, str, or bin")),
         }
@@ -205,6 +203,10 @@ struct CoapSetter {
     value: String,
     #[clap(short='t', default_value = "str")]
     value_type: ValType,
+    #[clap(long)]
+    keys: Option<String>,
+    #[clap(long)]
+    values: Option<String>,
     #[clap(short='e')]
     exp_rsp: bool,
 }
@@ -215,20 +217,31 @@ struct CoapFotaReq {
     addr: String,
 }
 
-fn encode_req_payload(key: String, value: String, value_type: ValType) -> BTreeMap<String, ciborium::value::Value> {
+fn encode_req_payload(key: String, value: String, keys:Option<String>, values: Option<String>, value_type: ValType) -> BTreeMap<String, ciborium::value::Value> {
     let mut data_map: BTreeMap<String, ciborium::value::Value> = BTreeMap::new();
 
     match value_type {
         ValType::StringType => {
             data_map.insert(key, ciborium::value::Value::Text(value));
-
         }
         ValType::IntType => {
-            data_map.insert(key, ciborium::value::Value::Integer(
-                    ciborium::value::Integer::from(
-                        value.parse::<i32>().unwrap()
-                        )
-                    ));
+            if let (Some(keys), Some(values)) = (keys, values) {
+                let key_iter = keys.split(',');
+                let value_iter = values.split(',');
+                for (k, v) in key_iter.zip(value_iter) {
+                    data_map.insert(k.to_string(), ciborium::value::Value::Integer(
+                            ciborium::value::Integer::from(
+                                v.parse::<i32>().unwrap()
+                                )
+                            ));
+                }
+            } else {
+                data_map.insert(key, ciborium::value::Value::Integer(
+                        ciborium::value::Integer::from(
+                            value.parse::<i32>().unwrap()
+                            )
+                        ));
+            }
         }
         ValType::BinType => {
             let bin_vec = value
@@ -241,41 +254,6 @@ fn encode_req_payload(key: String, value: String, value_type: ValType) -> BTreeM
 
             data_map.insert(key, ciborium::value::Value::Bytes(bin_vec));
         }
-        ValType::RgbwType => {
-            #[derive(Debug)]
-            struct RgbwValues {
-                r: u16,
-                g: u16,
-                b: u16,
-                w: u16,
-                d: u16,
-            }
-            impl std::str::FromStr for RgbwValues {
-                type Err = String;
-                fn from_str(value: &str) -> Result<Self, Self::Err> {
-                    if value.len() != 10 { return Err("Invalid string length".to_string()); }
-
-                    let val = value
-                        .chars()
-                        .collect::<Vec<char>>()
-                        .chunks(2)
-                        .map(|c| c.iter().collect::<String>())
-                        .collect::<Vec<String>>();
-                    Ok(RgbwValues {
-                        r: u16::from_str_radix(&val[0], 16).unwrap(),
-                        g: u16::from_str_radix(&val[1], 16).unwrap(),
-                        b: u16::from_str_radix(&val[2], 16).unwrap(),
-                        w: u16::from_str_radix(&val[3], 16).unwrap(),
-                        d: u16::from_str_radix(&val[4], 16).unwrap(),
-                    })
-                }
-            }
-            let input: RgbwValues = value.parse().unwrap();
-            data_map.insert("r".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.r)));
-            data_map.insert("g".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.g)));
-            data_map.insert("b".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.b)));
-            data_map.insert("w".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.w)));
-            data_map.insert("d".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.d * 100)));
         ValType::BoolType => {
             data_map.insert(key, ciborium::value::Value::Bool(
                         value.parse::<bool>().unwrap()
@@ -351,9 +329,6 @@ fn main() {
                 ValType::BinType => {
                     return;
                 }
-                ValType::RgbwType => {
-                    return;
-                }
                 ValType::BoolType => {
                     return;
                 }
@@ -380,7 +355,7 @@ fn main() {
             let payload_map;
 
             if let (Some(key), Some(val)) = (data.key, data.value) {
-                payload_map = Some(encode_req_payload(key, val, data.value_type));
+                payload_map = Some(encode_req_payload(key, val, None, None, data.value_type));
             } else {
                 payload_map = None;
             }
@@ -432,7 +407,7 @@ fn main() {
 
         SubCommand::Set(data) => {
             let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
-            let data_map = encode_req_payload(data.key, data.value, data.value_type);
+            let data_map = encode_req_payload(data.key, data.value, data.keys, data.values, data.value_type);
 
             let future_result = post_data(&remote_endpoint,
                                           RelRef::from_str(&data.resource).unwrap(),
