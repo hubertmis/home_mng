@@ -134,6 +134,7 @@ enum ValType {
     IntType,
     BinType,
     RgbwType,
+    BoolType,
 }
 
 impl FromStr for ValType {
@@ -144,6 +145,7 @@ impl FromStr for ValType {
             "str" => Ok(ValType::StringType),
             "bin" => Ok(ValType::BinType),
             "rgbw" => Ok(ValType::RgbwType),
+            "bool" => Ok(ValType::BoolType),
             _ => Err(clap::Error::raw(clap::ErrorKind::InvalidValue, "Unknown value type. Use int, str, or bin")),
         }
     }
@@ -274,6 +276,10 @@ fn encode_req_payload(key: String, value: String, value_type: ValType) -> BTreeM
             data_map.insert("b".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.b)));
             data_map.insert("w".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.w)));
             data_map.insert("d".to_string(), ciborium::value::Value::Integer(ciborium::value::Integer::from(input.d * 100)));
+        ValType::BoolType => {
+            data_map.insert(key, ciborium::value::Value::Bool(
+                        value.parse::<bool>().unwrap()
+                    ));
         }
     }
 
@@ -346,6 +352,9 @@ fn main() {
                     return;
                 }
                 ValType::RgbwType => {
+                    return;
+                }
+                ValType::BoolType => {
                     return;
                 }
             }
