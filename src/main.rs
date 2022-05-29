@@ -361,15 +361,18 @@ fn main() {
             }
 
             let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
+            let uri = RelRef::from_str(&data.resource).unwrap();
             let future_result = remote_endpoint.send_to(
-                RelRef::from_str(&data.resource).unwrap(),
+                uri,
                 CoapRequest::get()
                     .payload_writer(|msg_wrt| {
                             msg_wrt.clear();
                             msg_wrt.set_msg_type(MsgType::Con);
                             msg_wrt.set_msg_code(MsgCode::MethodGet);
                             msg_wrt.set_msg_token(MsgToken::EMPTY);
-                            msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, &data.resource).unwrap();
+                            for path_item in uri.path_segments() {
+                                msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, &path_item).unwrap();
+                            }
                             if let Some(payload_map) = &payload_map {
                                 msg_wrt.insert_option_with_u32(OptionNumber::CONTENT_FORMAT, ContentFormat::APPLICATION_CBOR.0.into()).unwrap();
                                 ciborium::ser::into_writer(&payload_map, msg_wrt).unwrap();
