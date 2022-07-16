@@ -305,6 +305,7 @@ fn main() {
             let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &prov.addr);
             let mut data_str = BTreeMap::new();
             let mut data_int = BTreeMap::new();
+            let mut data_bool = BTreeMap::new();
             let future_result;
 
             match prov.value_type {
@@ -330,7 +331,13 @@ fn main() {
                     return;
                 }
                 ValType::BoolType => {
-                    return;
+                    data_bool.insert(prov.key, prov.value.parse::<bool>().unwrap());
+
+                    future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
+                        msg_wrt.set_msg_code(MsgCode::MethodPost);
+                        ciborium::ser::into_writer(&data_bool, msg_wrt).unwrap();
+                        Ok(())
+                    });
                 }
             }
 
