@@ -1,114 +1,8 @@
-use socket2::{Socket, Domain, Type};
-use std::net::SocketAddr;
 use std::sync::Arc;
-use futures::{prelude::*,executor::LocalPool,task::LocalSpawnExt};
-use async_coap::prelude::*;
-use async_coap::datagram::{DatagramLocalEndpoint,AllowStdUdpSocket,DatagramRemoteEndpoint};
-use async_coap::uri::{Uri, RelRef};
-
-use async_coap::Error;
-use async_coap::InboundContext;
-use async_coap::message::{OwnedImmutableMessage, MessageWrite};
-
-use std::collections::BTreeMap;
-use futures::future::BoxFuture;
+use futures::{executor::LocalPool,task::LocalSpawnExt};
 
 use clap::Parser;
 use std::str::FromStr;
-
-use std::fmt::Write;
-
-fn get_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdUdpSocket>>, addr: &Uri) -> DatagramRemoteEndpoint<AllowStdUdpSocket> {
-    local_endpoint
-        .remote_endpoint_from_uri(addr)
-        .unwrap()
-}
-
-fn get_multicast_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdUdpSocket>>) -> DatagramRemoteEndpoint<AllowStdUdpSocket> {
-    get_remote_endpoint(local_endpoint, uri!("coap://[ff05::1]"))
-}
-
-fn get_addr_remote_endpoint(local_endpoint: &Arc<DatagramLocalEndpoint<AllowStdUdpSocket>>, addr: &str) -> DatagramRemoteEndpoint<AllowStdUdpSocket> {
-    let uri = String::new() + "coap://[" + addr + "]";
-    get_remote_endpoint(&local_endpoint, Uri::from_str(&uri).unwrap())
-}
-
-fn search_services(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>,
-                   srv_name: Option<String>, srv_type: Option<String>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
-    fn service_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
-        let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
-        for (service, details) in data.iter() {
-            println!("{}: {:?}: {}", service, details.get("type"), context.unwrap().remote_socket_addr());
-        }
-
-        Ok(ResponseStatus::Continue)
-    }
-
-    if srv_name.is_some() || srv_type.is_some() {
-        remote_endpoint.send_to(
-            rel_ref!("sd"),
-            CoapRequest::get()
-                .multicast()
-                .content_format(ContentFormat::APPLICATION_CBOR)
-                .payload_writer(move |msg_wrt| {
-                            let mut data = BTreeMap::new();
-                            if let Some(srv_name) = &srv_name {
-                                data.insert("name", srv_name);
-                            }
-                            if let Some(srv_type) = &srv_type {
-                                data.insert("type", srv_type);
-                            }
-                            msg_wrt.set_msg_type(MsgType::Non);
-                            msg_wrt.set_msg_code(MsgCode::MethodGet);
-                            ciborium::ser::into_writer(&data, msg_wrt).unwrap();
-                            Ok(())
-                })
-                .use_handler(service_finder)
-            )
-    } else {
-        remote_endpoint.send_to(
-            rel_ref!("sd"),
-            CoapRequest::get()
-                .multicast()
-                .use_handler(service_finder)
-            )
-    }
-}
-
-fn search_not_provisioned(remote_endpoint: &DatagramRemoteEndpoint<AllowStdUdpSocket>) -> BoxFuture<Result<OwnedImmutableMessage, Error>> {
-    fn not_prov_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
-        let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
-        if data.len() == 0 {
-            println!("Addr: {}", context.unwrap().remote_socket_addr());
-        }
-
-        Ok(ResponseStatus::Continue)
-    }
-
-    let future_result = remote_endpoint.send_to(
-        rel_ref!("sd"),
-        CoapRequest::get()
-            .multicast()
-            .use_handler(not_prov_finder) 
-        );
-
-    future_result
-}
-
-fn post_data<'a, F>(remote_endpoint: &'a DatagramRemoteEndpoint<AllowStdUdpSocket>, path: &'a RelRef, writer: F) -> BoxFuture<'a, Result<OwnedImmutableMessage, Error>> 
-    where
-    F: 'a + Fn(&mut dyn MessageWrite) -> Result<(), Error> + Send + std::marker::Sync,
-{
-    let future_result = remote_endpoint.send_to(
-        path,
-        CoapRequest::post()
-            .content_format(ContentFormat::APPLICATION_CBOR)
-            .payload_writer(writer)
-            .emit_successful_response()
-        );
-
-    future_result
-}
 
 #[derive(Parser,Debug)]
 #[clap(version = "0.1", author = "Hubert Miś <hubert.mis@gmail.com>")]
@@ -146,6 +40,17 @@ impl FromStr for ValType {
             "bool" => Ok(ValType::BoolType),
             _ => Err(clap::Error::raw(clap::ErrorKind::InvalidValue, "Unknown value type. Use int, str, or bin")),
         }
+    }
+}
+
+impl ToString for ValType {
+    fn to_string(&self) -> String {
+        match self {
+            ValType::StringType => "str",
+            ValType::IntType => "int",
+            ValType::BinType => "bin",
+            ValType::BoolType => "bool",
+        }.to_string()
     }
 }
 
@@ -189,6 +94,8 @@ struct CoapGetter {
     value: Option<String>,
     #[clap(short='t', default_value = "str")]
     value_type: ValType,
+    #[clap(long)]
+    keys: Option<String>,
 }
 
 #[derive(Parser,Debug)]
@@ -217,30 +124,48 @@ struct CoapFotaReq {
     addr: String,
 }
 
-fn encode_req_payload(key: String, value: String, keys:Option<String>, values: Option<String>, value_type: ValType) -> BTreeMap<String, ciborium::value::Value> {
-    let mut data_map: BTreeMap<String, ciborium::value::Value> = BTreeMap::new();
+fn encode_req_payload(key: String, value: String, keys:Option<String>, values: Option<String>, value_type: ValType) -> ciborium::value::Value {
+    let result: ciborium::value::Value;
 
     match value_type {
         ValType::StringType => {
-            data_map.insert(key, ciborium::value::Value::Text(value));
+            match (keys, values) {
+                (Some(keys), Some(values)) => result = ciborium::value::Value::Null,
+                (Some(keys), None) => {
+                    let mut key_results_vec: Vec<ciborium::value::Value> = Vec::new();
+                    for k in keys.split(',') {
+                        key_results_vec.push(k.into());
+                    }
+                    result = ciborium::value::Value::Array(key_results_vec);
+                }
+                (_, _) => result = ciborium::value::Value::Map([(
+                                ciborium::value::Value::Text(key),
+                                ciborium::value::Value::Text(value))].to_vec()),
+            }
         }
         ValType::IntType => {
             if let (Some(keys), Some(values)) = (keys, values) {
                 let key_iter = keys.split(',');
                 let value_iter = values.split(',');
+                let mut vec_pairs = Vec::new();
                 for (k, v) in key_iter.zip(value_iter) {
-                    data_map.insert(k.to_string(), ciborium::value::Value::Integer(
-                            ciborium::value::Integer::from(
-                                v.parse::<i32>().unwrap()
+                    vec_pairs.push((
+                            ciborium::value::Value::Text(k.to_string()),
+                            ciborium::value::Value::Integer(
+                                ciborium::value::Integer::from(
+                                    v.parse::<i32>().unwrap()
                                 )
-                            ));
+                            )));
                 }
+                result = ciborium::value::Value::Map(vec_pairs);
             } else {
-                data_map.insert(key, ciborium::value::Value::Integer(
-                        ciborium::value::Integer::from(
-                            value.parse::<i32>().unwrap()
+                result = ciborium::value::Value::Map([(
+                        ciborium::value::Value::Text(key),
+                        ciborium::value::Value::Integer(
+                            ciborium::value::Integer::from(
+                                value.parse::<i32>().unwrap()
                             )
-                        ));
+                        ))].to_vec());
             }
         }
         ValType::BinType => {
@@ -252,109 +177,54 @@ fn encode_req_payload(key: String, value: String, keys:Option<String>, values: O
                 .map(|c| u8::from_str_radix(&c, 16).unwrap())
                 .collect::<Vec<u8>>();
 
-            data_map.insert(key, ciborium::value::Value::Bytes(bin_vec));
+                result = ciborium::value::Value::Map([(
+                        ciborium::value::Value::Text(key),
+                        ciborium::value::Value::Bytes(bin_vec)
+                        )].to_vec());
         }
         ValType::BoolType => {
-            data_map.insert(key, ciborium::value::Value::Bool(
-                        value.parse::<bool>().unwrap()
-                    ));
+                result = ciborium::value::Value::Map([(
+                        ciborium::value::Value::Text(key),
+                        ciborium::value::Value::Bool(
+                            value.parse::<bool>().unwrap()
+                        ))].to_vec());
         }
     }
 
-    data_map
+    result
 }
 
 fn main() {
     let opts = Opts::parse();
     println!("{:?}", opts);
 
-    let udp_socket = Socket::new(Domain::IPV6, Type::DGRAM, None).expect("Socket creating failed");
-    let address: SocketAddr = "[::]:0".parse().unwrap();
-    let address = address.into();
-    udp_socket.set_nonblocking(true).unwrap();
-    udp_socket.set_multicast_hops_v6(16).expect("Setting multicast hops failed");
-    udp_socket.bind(&address).expect("UDP bind failed");
-
-    let socket = AllowStdUdpSocket::from_std(udp_socket.into());
-
-    let local_endpoint = Arc::new(DatagramLocalEndpoint::new(socket));
+    let coap = Arc::new(home_mng::Coap::new());
 
     let mut pool = LocalPool::new();
     pool.spawner().spawn_local(
-        local_endpoint
-        .clone()
-        .receive_loop_arc(null_receiver!())
-        .map(|err| panic!("Receive loop terminated: {}", err))
+        coap.clone().receive_loop_arc()
         )
         .unwrap();
 
     match opts.subcmd {
         SubCommand::ServiceDiscovery(sd_filter) => {
-            let remote_endpoint = get_multicast_remote_endpoint(&local_endpoint);
-            let future_result = search_services(&remote_endpoint, sd_filter.service_name, sd_filter.service_type);
+            let future_result = coap.service_discovery(sd_filter.service_name.as_deref(), sd_filter.service_type.as_deref());
             let _result = pool.run_until(future_result);
         }
 
         SubCommand::NotProvisioned => {
-            let remote_endpoint = get_multicast_remote_endpoint(&local_endpoint);
-            let future_result = search_not_provisioned(&remote_endpoint);
+            let future_result = coap.not_provisioned_discovery();
             let _result = pool.run_until(future_result);
         }
 
         SubCommand::Provision(prov) => {
-            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &prov.addr);
-            let mut data_str = BTreeMap::new();
-            let mut data_int = BTreeMap::new();
-            let mut data_bool = BTreeMap::new();
-            let future_result;
-
-            match prov.value_type {
-                ValType::StringType => {
-                    data_str.insert(prov.key, prov.value);
-
-                    future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
-                        msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        ciborium::ser::into_writer(&data_str, msg_wrt).unwrap();
-                        Ok(())
-                    });
-                }
-                ValType::IntType => {
-                    data_int.insert(prov.key, prov.value.parse::<i32>().unwrap());
-
-                    future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
-                        msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        ciborium::ser::into_writer(&data_int, msg_wrt).unwrap();
-                        Ok(())
-                    });
-                }
-                ValType::BinType => {
-                    return;
-                }
-                ValType::BoolType => {
-                    data_bool.insert(prov.key, prov.value.parse::<bool>().unwrap());
-
-                    future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
-                        msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        ciborium::ser::into_writer(&data_bool, msg_wrt).unwrap();
-                        Ok(())
-                    });
-                }
-            }
-
+            let value = home_mng::Value::from_type_and_str(&prov.value_type.to_string(), &prov.value).unwrap();
+            let future_result = coap.provision(&prov.addr, &prov.key, &value);
             let _result = pool.run_until(future_result);
         }
 
         SubCommand::ResetProvisioning(prov) => {
-            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &prov.addr);
-            let mut data = BTreeMap::new();
-            data.insert(prov.key, "");
-
-            let future_result = post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
-                msg_wrt.set_msg_code(MsgCode::MethodPost);
-                ciborium::ser::into_writer(&data, msg_wrt).unwrap();
-                Ok(())
-            });
-
+            let future_result = coap.reset_provisioning(&prov.addr, &prov.key);
             let _result = pool.run_until(future_result);
         }
 
@@ -362,71 +232,19 @@ fn main() {
             let payload_map;
 
             if let (Some(key), Some(val)) = (data.key, data.value) {
-                payload_map = Some(encode_req_payload(key, val, None, None, data.value_type));
+                payload_map = Some(encode_req_payload(key, val, data.keys, None, data.value_type));
             } else {
                 payload_map = None;
             }
 
-            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
-            let uri = RelRef::from_str(&data.resource).unwrap();
-            let future_result = remote_endpoint.send_to(
-                uri,
-                CoapRequest::get()
-                    .payload_writer(|msg_wrt| {
-                            msg_wrt.clear();
-                            msg_wrt.set_msg_type(MsgType::Con);
-                            msg_wrt.set_msg_code(MsgCode::MethodGet);
-                            msg_wrt.set_msg_token(MsgToken::EMPTY);
-                            for path_item in uri.path_segments() {
-                                msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, &path_item).unwrap();
-                            }
-                            if let Some(payload_map) = &payload_map {
-                                msg_wrt.insert_option_with_u32(OptionNumber::CONTENT_FORMAT, ContentFormat::APPLICATION_CBOR.0.into()).unwrap();
-                                ciborium::ser::into_writer(&payload_map, msg_wrt).unwrap();
-                            }
-                            Ok(())
-                        })
-                    .use_handler(|context| {
-                            let msg_read = context.unwrap().message();
-
-                            for opt in msg_read.options() {
-                                match opt {
-                                    Ok((async_coap::option::OptionNumber::CONTENT_FORMAT, cnt_fmt)) => {
-                                        match cnt_fmt {
-                                            [] => {
-                                                let data = std::str::from_utf8(msg_read.payload()).unwrap();
-                                                println!("Data: {}", data);
-                                            }
-                                            [60] => {
-                                                let data : ciborium::value::Value = ciborium::de::from_reader(msg_read.payload()).unwrap();
-                                                println!("Data: {:?}", data);
-                                            }
-                                            _ => println!("Unknown content format"),
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            Ok(ResponseStatus::Done(()))
-                        })
-                    );
-
+            let future_result = coap.get(&data.addr, &data.resource, payload_map.as_ref());
             let _result = pool.run_until(future_result);
         }
 
         SubCommand::Set(data) => {
-            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
             let data_map = encode_req_payload(data.key, data.value, data.keys, data.values, data.value_type);
 
-            let future_result = post_data(&remote_endpoint,
-                                          RelRef::from_str(&data.resource).unwrap(),
-                                          |msg_wrt| {
-                msg_wrt.set_msg_code(MsgCode::MethodPost);
-                ciborium::ser::into_writer(&data_map, msg_wrt).unwrap();
-                Ok(())
-            });
-
+            let future_result = coap.set(&data.addr, &data.resource, &data_map);
             let _result = pool.run_until(future_result);
         }
 
@@ -445,24 +263,9 @@ fn main() {
             }
 
             let local_addr = local_addr_opt.expect("Local IPv6 address not found");
-            let payload = format!("coap://[{}]/fota", local_addr);
+            let local_addr = format!("[{}]", local_addr);
 
-            let remote_endpoint = get_addr_remote_endpoint(&local_endpoint, &data.addr);
-            let future_result = remote_endpoint.send_to(
-                RelRef::from_str("fota_req").unwrap(),
-                CoapRequest::post()
-                    .content_format(ContentFormat::TEXT_PLAIN_UTF8)
-                    .payload_writer(|msg_wrt| { 
-                        msg_wrt.clear();
-                        msg_wrt.set_msg_type(MsgType::Con);
-                        msg_wrt.set_msg_code(MsgCode::MethodPost);
-                        msg_wrt.set_msg_token(MsgToken::EMPTY);
-                        msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, "fota_req").unwrap();
-                        msg_wrt.write_str(&payload).unwrap();
-                        Ok(())
-                    })
-                    .emit_successful_response()
-                );
+            let future_result = coap.fota_req(&data.addr, &local_addr);
 
             let _result = pool.run_until(future_result);
         }
