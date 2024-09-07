@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use futures::{executor::LocalPool,task::LocalSpawnExt};
-
 use clap::Parser;
 use std::str::FromStr;
 
@@ -130,7 +127,7 @@ fn encode_req_payload(key: String, value: String, keys:Option<String>, values: O
     match value_type {
         ValType::StringType => {
             match (keys, values) {
-                (Some(keys), Some(values)) => result = ciborium::value::Value::Null,
+                (Some(_), Some(_)) => result = ciborium::value::Value::Null,
                 (Some(keys), None) => {
                     let mut key_results_vec: Vec<ciborium::value::Value> = Vec::new();
                     for k in keys.split(',') {
@@ -194,38 +191,35 @@ fn encode_req_payload(key: String, value: String, keys:Option<String>, values: O
     result
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let opts = Opts::parse();
     println!("{:?}", opts);
 
-    let coap = Arc::new(home_mng::Coap::new());
-
-    let mut pool = LocalPool::new();
-    pool.spawner().spawn_local(
-        coap.clone().receive_loop_arc()
-        )
-        .unwrap();
+    let coap = home_mng::Coap::new();
 
     match opts.subcmd {
         SubCommand::ServiceDiscovery(sd_filter) => {
-            let future_result = coap.service_discovery(sd_filter.service_name.as_deref(), sd_filter.service_type.as_deref());
-            let _result = pool.run_until(future_result);
+            let result = coap.service_discovery(sd_filter.service_name.as_deref(), sd_filter.service_type.as_deref()).await;
+
+            if let Ok(services) = result {
+                for service in services {
+                    println!("{}: {:?}: {:?}", service.0, service.1, service.2);
+                }
+            }
         }
 
         SubCommand::NotProvisioned => {
-            let future_result = coap.not_provisioned_discovery();
-            let _result = pool.run_until(future_result);
+            let _ = coap.not_provisioned_discovery().await;
         }
 
         SubCommand::Provision(prov) => {
             let value = home_mng::Value::from_type_and_str(&prov.value_type.to_string(), &prov.value).unwrap();
-            let future_result = coap.provision(&prov.addr, &prov.key, &value);
-            let _result = pool.run_until(future_result);
+            let _ = coap.provision(&prov.addr, &prov.key, &value).await;
         }
 
         SubCommand::ResetProvisioning(prov) => {
-            let future_result = coap.reset_provisioning(&prov.addr, &prov.key);
-            let _result = pool.run_until(future_result);
+            let _ = coap.reset_provisioning(&prov.addr, &prov.key).await;
         }
 
         SubCommand::Get(data) => {
@@ -237,15 +231,13 @@ fn main() {
                 payload_map = None;
             }
 
-            let future_result = coap.get(&data.addr, &data.resource, payload_map.as_ref());
-            let _result = pool.run_until(future_result);
+            let _ = coap.get(&data.addr, &data.resource, payload_map.as_ref()).await;
         }
 
         SubCommand::Set(data) => {
             let data_map = encode_req_payload(data.key, data.value, data.keys, data.values, data.value_type);
 
-            let future_result = coap.set(&data.addr, &data.resource, &data_map);
-            let _result = pool.run_until(future_result);
+            let _ = coap.set(&data.addr, &data.resource, &data_map).await;
         }
 
         SubCommand::FotaReq(data) => {
@@ -265,9 +257,7 @@ fn main() {
             let local_addr = local_addr_opt.expect("Local IPv6 address not found");
             let local_addr = format!("[{}]", local_addr);
 
-            let future_result = coap.fota_req(&data.addr, &local_addr);
-
-            let _result = pool.run_until(future_result);
+            let _ = coap.fota_req(&data.addr, &local_addr).await;
         }
     }
 }

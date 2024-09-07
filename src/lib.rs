@@ -1,18 +1,11 @@
 use std::collections::BTreeMap;
-use std::fmt::Write;
-use std::net::SocketAddr;
+use std::io::Error;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::Arc;
 
-use async_coap::prelude::*;
-use async_coap::Error;
-use async_coap::InboundContext;
-use async_coap::{LocalEndpoint as _AsyncCoapLocalEndpoint, RemoteEndpoint as _AsyncCoapRemoteEndpoint};
-use async_coap::datagram::{DatagramLocalEndpoint,AllowStdUdpSocket,DatagramRemoteEndpoint};
-use async_coap::message::{OwnedImmutableMessage, MessageWrite};
-use async_coap::uri::{Uri, RelRef};
-
-use futures::prelude::*;
+use coap_lite::{CoapRequest, CoapResponse, ContentFormat, MessageClass, ResponseType};
+use coap::client::{MessageReceiver, Packet, UdpCoAPClient};
+use coap::request::{CoapOption, Method, RequestBuilder};
 
 use socket2::{Socket, Domain, Type};
 
@@ -39,243 +32,199 @@ impl Value {
     }
 }
 
-type LocalEndpoint = DatagramLocalEndpoint<AllowStdUdpSocket>;
-type RemoteEndpoint = DatagramRemoteEndpoint<AllowStdUdpSocket>;
-
 pub struct Coap {
-    pub local_endpoint: LocalEndpoint,
 }
 
 impl Coap {
     pub fn new() -> Self {
-        let udp_socket = Socket::new(Domain::IPV6, Type::DGRAM, None).expect("Socket creating failed");
-        let address: SocketAddr = "[::]:0".parse().unwrap();
-        let address = address.into();
-        udp_socket.set_nonblocking(true).unwrap();
-        udp_socket.set_multicast_hops_v6(16).expect("Setting multicast hops failed");
-        udp_socket.bind(&address).expect("UDP bind failed");
-
-        let socket = AllowStdUdpSocket::from_std(udp_socket.into());
-
         Self {
-            local_endpoint: DatagramLocalEndpoint::new(socket),
         }
     }
 
-    pub async fn receive_loop_arc(self: Arc<Self>) {
-        self.local_endpoint
-            .receive_loop(null_receiver!())
-            .map(|err| panic!("Receive loop terminated: {}", err))
-            .await
+    fn create_multicast_socket() -> std::net::UdpSocket {
+        let udp_socket = Socket::new(Domain::IPV6, Type::DGRAM, None).expect("Socket creating failed");
+        udp_socket.set_multicast_hops_v6(16).expect("Setting multicast hops failed");
+        udp_socket.into()
     }
 
-    fn get_remote_endpoint(&self, addr: &Uri) -> RemoteEndpoint {
-        self.local_endpoint
-            .remote_endpoint_from_uri(addr)
-            .unwrap()
+    fn set_content_format(request_builder: RequestBuilder, content_format: Option<ContentFormat>) -> RequestBuilder {
+        if let Some(content_format) = content_format {
+            request_builder.options([(CoapOption::ContentFormat,
+                                      [usize::from(content_format) as u8].to_vec())
+                                    ].to_vec())
+        } else {
+            request_builder
+        }
     }
 
-    fn get_addr_remote_endpoint(&self, addr: &str) -> RemoteEndpoint {
-        let uri = String::new() + "coap://[" + addr + "]";
-        self.get_remote_endpoint(Uri::from_str(&uri).unwrap())
+    async fn send_multicast(request: &CoapRequest<SocketAddr>) -> Result<(UdpCoAPClient, MessageReceiver), Error> {
+        let port = 5683;
+        let client = UdpCoAPClient::new_with_std_socket(Self::create_multicast_socket(), "[::1]:5683").await.unwrap();
+        let receiver = client.create_receiver_for(&request).await;
+        let peer_addr = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(
+                0xff05, 0, 0, 0, 0, 0, 0, 0x1,
+            )),
+            port,
+        );
+        client.send_multicast(&request, &peer_addr).await.unwrap();
+
+        Ok((client, receiver))
     }
 
-    fn get_multicast_remote_endpoint(&self) -> RemoteEndpoint {
-        self.get_remote_endpoint(uri!("coap://[ff05::1]"))
+    async fn post(addr: &str, resource: &str, content_format: Option<ContentFormat>, payload: Option<Vec<u8>>) -> Result<CoapResponse, std::io::Error>{
+        let domain = addr;
+        let port = 5683;
+        let path = resource;
+
+        let client = UdpCoAPClient::new_udp((domain, port)).await?;
+        let request = RequestBuilder::new(path, Method::Post)
+            .domain(domain.to_string())
+            .confirmable(true);
+        let request = Self::set_content_format(request, content_format);
+
+        let request = request
+            .data(payload)
+            .build();
+
+        client.send(request).await
     }
 
-    async fn post_data<F>(remote_endpoint: &RemoteEndpoint, path: &RelRef, writer: F) -> Result<OwnedImmutableMessage, Error>
-        where
-        F: Fn(&mut dyn MessageWrite) -> Result<(), Error> + Send + std::marker::Sync,
+    async fn post_provisioning(addr: &str, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<CoapResponse, Error>
     {
-        remote_endpoint.send_to(
-            path,
-            CoapRequest::post()
-                .content_format(ContentFormat::APPLICATION_CBOR)
-                .payload_writer(writer)
-                .emit_successful_response()
-            )
-        .await
-    }
-
-    async fn post_provisioning(remote_endpoint: &RemoteEndpoint, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<OwnedImmutableMessage, Error>
-    {
-        Self::post_data(&remote_endpoint, rel_ref!("prov"), |msg_wrt| {
-            msg_wrt.set_msg_code(MsgCode::MethodPost);
-            ciborium::ser::into_writer(&tree, msg_wrt).unwrap();
-            Ok(())
-        })
-        .await
+        let mut payload = Vec::<u8>::new();
+        ciborium::ser::into_writer(tree, &mut payload).expect("Could not serialize payload");
+        Self::post(addr, "prov", Some(ContentFormat::ApplicationCBOR), Some(payload)).await
     }
         
-    async fn search_services<'a: 'd, 'b: 'd, 'c: 'd, 'd>(remote_endpoint: &'a RemoteEndpoint,
-                       srv_name: Option<&'b str>, srv_type: Option<&'c str>) -> Result<OwnedImmutableMessage, Error> {
-        fn service_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
-            let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
-            for (service, details) in data.iter() {
-                println!("{}: {:?}: {}", service, details.get("type"), context.unwrap().remote_socket_addr());
-            }
+    async fn init_search_services(srv_name: Option<&str>, srv_type: Option<&str>) -> Result<(UdpCoAPClient, MessageReceiver), Error> {
+        let domain = "ff05::1";
+        let path = "sd";
 
-            Ok(ResponseStatus::Continue)
-        }
+        let request = RequestBuilder::new(path, Method::Get)
+            .domain(domain.to_string())
+            .confirmable(false)
+            .token(Some([0, 1, 2, 3].to_vec()));
+        let request = if srv_name.is_some() || srv_type.is_some() {
+            let mut data = BTreeMap::new();
+            srv_name.and_then(|n| data.insert("name", n));
+            srv_type.and_then(|t| data.insert("type", t));
 
-        if srv_name.is_some() || srv_type.is_some() {
-            remote_endpoint.send_to(
-                rel_ref!("sd"),
-                CoapRequest::get()
-                    .multicast()
-                    .content_format(ContentFormat::APPLICATION_CBOR)
-                    .payload_writer(move |msg_wrt| {
-                                let mut data = BTreeMap::new();
-                                if let Some(srv_name) = &srv_name {
-                                    data.insert("name", srv_name);
-                                }
-                                if let Some(srv_type) = &srv_type {
-                                    data.insert("type", srv_type);
-                                }
-                                msg_wrt.set_msg_type(MsgType::Non);
-                                msg_wrt.set_msg_code(MsgCode::MethodGet);
-                                ciborium::ser::into_writer(&data, msg_wrt).unwrap();
-                                Ok(())
-                    })
-                    .use_handler(service_finder)
-                )
-                .await
+            let mut payload = Vec::new();
+            ciborium::ser::into_writer(&data, &mut payload).unwrap();
+
+            Self::set_content_format(request, Some(ContentFormat::ApplicationCBOR))
+                .data(Some(payload))
         } else {
-            remote_endpoint.send_to(
-                rel_ref!("sd"),
-                CoapRequest::get()
-                    .multicast()
-                    .use_handler(service_finder)
-                )
-                .await
+            request
+        };
+        let request = request.build();
+
+        Self::send_multicast(&request).await
+    }
+
+    async fn get_service(receiver: &mut MessageReceiver) -> Result<Option<Packet>, Error> {
+        if let Ok(recv_packet) = tokio::time::timeout(
+            std::time::Duration::from_millis(2000),
+            receiver.receive()).await {
+                let recv_packet = recv_packet?;
+                if recv_packet.message.header.code != MessageClass::Response(
+                        ResponseType::Content) {
+                    Err(Error::new(std::io::ErrorKind::InvalidData, format!("Unexpected reponse type: {}", recv_packet.message.header.get_code())))
+                } else {
+                    Ok(Some(recv_packet))
+                }
+        } else {
+            Ok(None)
         }
     }
 
-    async fn search_not_provisioned(remote_endpoint: &RemoteEndpoint) -> Result<OwnedImmutableMessage, Error> {
-        fn not_prov_finder(context: Result<&dyn InboundContext<SocketAddr = SocketAddr>, Error>,) -> Result<ResponseStatus<OwnedImmutableMessage>, Error> {
-            let data : BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(context.unwrap().message().payload()).unwrap();
-            if data.len() == 0 {
-                println!("Addr: {}", context.unwrap().remote_socket_addr());
+    pub async fn service_discovery(&self, srv_name: Option<&str>, srv_type: Option<&str>) -> Result<Vec<(String, Option<String>, SocketAddr)>, Error> {
+        let mut result = Vec::new();
+        let (_client, mut receiver) = Self::init_search_services(srv_name, srv_type).await?;
+        while let Some(packet) = Self::get_service(&mut receiver).await? {
+            if let Some(address) = packet.address {
+                // TODO: check content type
+                let data: BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(&packet.message.payload[..]).unwrap();
+                for (service, details) in data.iter() {
+                    result.push((service.clone(), details.get("type").map(|t| t.clone()), address));
+                }
             }
-
-            Ok(ResponseStatus::Continue)
         }
-
-        remote_endpoint.send_to(
-            rel_ref!("sd"),
-            CoapRequest::get()
-                .multicast()
-                .use_handler(not_prov_finder) 
-            )
-            .await
+        Ok(result)
     }
 
-    pub async fn service_discovery(&self, srv_name: Option<&str>, srv_type: Option<&str>) -> Result<OwnedImmutableMessage, Error> {
-        let remote_endpoint = self.get_multicast_remote_endpoint();
-        Self::search_services(&remote_endpoint, srv_name, srv_type).await
+    pub async fn not_provisioned_discovery(&self) -> Result<Vec<SocketAddr>, Error> {
+        let mut result = Vec::new();
+        let (_client, mut receiver) = Self::init_search_services(None, None).await?;
+        while let Some(packet) = Self::get_service(&mut receiver).await? {
+            if let Some(address) = packet.address {
+                // TODO: check content type
+                let data: BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(&packet.message.payload[..]).unwrap();
+                if data.len() == 0 {
+                    result.push(address);
+                }
+            }
+        }
+        Ok(result)
     }
 
-    pub async fn not_provisioned_discovery(&self) -> Result<OwnedImmutableMessage, Error> {
-        let remote_endpoint = self.get_multicast_remote_endpoint();
-        Self::search_not_provisioned(&remote_endpoint).await
-    }
-
-    pub async fn provision(&self, addr: &str, key: &str, value: &Value) -> Result<OwnedImmutableMessage, Error> {
-        let remote_endpoint = self.get_addr_remote_endpoint(addr);
+    pub async fn provision(&self, addr: &str, key: &str, value: &Value) -> Result<CoapResponse, Error> {
         let tree = BTreeMap::from([
             (key, &value.0),
         ]);
 
-        Self::post_provisioning(&remote_endpoint, &tree).await
+        Self::post_provisioning(&addr, &tree).await
     }
 
-    pub async fn reset_provisioning(&self, addr: &str, key: &str) -> Result<OwnedImmutableMessage, Error> {
-        let remote_endpoint = self.get_addr_remote_endpoint(addr);
+    pub async fn reset_provisioning(&self, addr: &str, key: &str) -> Result<CoapResponse, Error> {
         let reset_value = ciborium::value::Value::Text("".to_string());
         let tree = BTreeMap::from([
             (key, &reset_value),
         ]);
 
-        Self::post_provisioning(&remote_endpoint, &tree).await
+        Self::post_provisioning(&addr, &tree).await
     }
 
-    pub async fn get(&self, addr: &str, resource: &str, payload_map: Option<&ciborium::value::Value>) -> Result<(), Error> {
-        let remote_endpoint = self.get_addr_remote_endpoint(addr);
-        let uri = RelRef::from_str(resource).unwrap();
-        remote_endpoint.send_to(
-            uri,
-            CoapRequest::get()
-                .payload_writer(|msg_wrt| {
-                        msg_wrt.clear();
-                        msg_wrt.set_msg_type(MsgType::Con);
-                        msg_wrt.set_msg_code(MsgCode::MethodGet);
-                        msg_wrt.set_msg_token(MsgToken::EMPTY);
-                        for path_item in uri.path_segments() {
-                            msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, &path_item).unwrap();
-                        }
-                        if let Some(payload_map) = &payload_map {
-                            msg_wrt.insert_option_with_u32(OptionNumber::CONTENT_FORMAT, ContentFormat::APPLICATION_CBOR.0.into()).unwrap();
-                            ciborium::ser::into_writer(&payload_map, msg_wrt).unwrap();
-                        }
-                        Ok(())
-                    })
-                .use_handler(|context| {
-                        let msg_read = context.unwrap().message();
+    pub async fn get(&self, addr: &str, resource: &str, _payload_map: Option<&ciborium::value::Value>) -> Result<(), Error> {
+        let url = format!("coap://[{}]/{}", addr, resource);
+        let response = UdpCoAPClient::get(&url).await.unwrap();
+        let payload = &response.message.payload;
 
-                        for opt in msg_read.options() {
-                            match opt {
-                                Ok((async_coap::option::OptionNumber::CONTENT_FORMAT, cnt_fmt)) => {
-                                    match cnt_fmt {
-                                        [] => {
-                                            let data = std::str::from_utf8(msg_read.payload()).unwrap();
-                                            println!("Data: {}", data);
-                                        }
-                                        [60] => {
-                                            let data : ciborium::value::Value = ciborium::de::from_reader(msg_read.payload()).unwrap();
-                                            println!("Data: {:?}", data);
-                                        }
-                                        _ => println!("Unknown content format"),
-                                    }
-                                }
-                                _ => {}
+        // TODO: insert payload
+
+        for opt in response.message.options() {
+            match (CoapOption::from(*opt.0) as CoapOption, opt.1) {
+                (CoapOption::ContentFormat, cnt_fmt) => { 
+                    for cnt_fmt in cnt_fmt {
+                        match cnt_fmt[..] {
+                            [] => {
+                                let data = std::str::from_utf8(&payload).unwrap();
+                                println!("Data: {}", data);
                             }
+                            [60] => {
+                                let data : ciborium::value::Value = ciborium::de::from_reader(&payload[..]).unwrap();
+                                println!("Data: {:?}", data);
+                            }
+                            _ => println!("Unknown content format"),
                         }
+                    }
+                }
+                _ => {}
+            }
+        }
 
-                        Ok(ResponseStatus::Done(()))
-                    })
-                ).await
+        Ok(())
     }
 
-    pub async fn set(&self, addr: &str, resource: &str, payload_map: &ciborium::value::Value) -> Result<OwnedImmutableMessage, Error> {
-        let remote_endpoint = self.get_addr_remote_endpoint(addr);
-        Self::post_data(&remote_endpoint,
-                  RelRef::from_str(resource).unwrap(),
-                  |msg_wrt| {
-            msg_wrt.set_msg_code(MsgCode::MethodPost);
-            ciborium::ser::into_writer(&payload_map, msg_wrt).unwrap();
-            Ok(())
-        }).await
+    pub async fn set(&self, addr: &str, resource: &str, payload_map: &ciborium::value::Value) -> Result<CoapResponse, Error> {
+        let mut payload = Vec::<u8>::new();
+        ciborium::ser::into_writer(&payload_map, &mut payload).expect("Could not serialize payload");
+        Self::post(addr, resource, Some(ContentFormat::ApplicationCBOR), Some(payload)).await
     }
 
-    pub async fn fota_req(&self, rmt_addr: &str, local_addr: &str) -> Result<OwnedImmutableMessage, Error> {
+    pub async fn fota_req(&self, rmt_addr: &str, local_addr: &str) -> Result<CoapResponse, Error> {
         let payload = format!("coap://{}/fota", local_addr);
-        let remote_endpoint = self.get_addr_remote_endpoint(rmt_addr);
-
-        remote_endpoint.send_to(
-            RelRef::from_str("fota_req").unwrap(),
-            CoapRequest::post()
-                .content_format(ContentFormat::TEXT_PLAIN_UTF8)
-                .payload_writer(|msg_wrt| {
-                    msg_wrt.clear();
-                    msg_wrt.set_msg_type(MsgType::Con);
-                    msg_wrt.set_msg_code(MsgCode::MethodPost);
-                    msg_wrt.set_msg_token(MsgToken::EMPTY);
-                    msg_wrt.insert_option_with_str(OptionNumber::URI_PATH, "fota_req").unwrap();
-                    msg_wrt.write_str(&payload).unwrap();
-                    Ok(())
-                })
-                .emit_successful_response()
-            ).await
+        Self::post(rmt_addr, "fota_req", Some(ContentFormat::TextPlain), Some(payload.into())).await
     }
 }
