@@ -3,8 +3,8 @@ use std::io::Error;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
-use coap_lite::{CoapRequest, CoapResponse, ContentFormat, MessageClass, ResponseType};
-use coap::client::{MessageReceiver, Packet, UdpCoAPClient};
+use coap_lite::{CoapRequest, CoapResponse, ContentFormat, MessageClass, Packet, ResponseType};
+use coap::client::{MessageReceiver, UdpCoAPClient};
 use coap::request::{CoapOption, Method, RequestBuilder};
 
 use socket2::{Socket, Domain, Type};
@@ -30,6 +30,11 @@ impl Value {
             _ => Err("Invalid value's type".into()),
         }
     }
+}
+
+pub enum Content {
+    PlainText(String),
+    Cbor(ciborium::value::Value),
 }
 
 pub struct Coap {
@@ -90,11 +95,12 @@ impl Coap {
         client.send(request).await
     }
 
-    async fn post_provisioning(addr: &str, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<CoapResponse, Error>
+    async fn post_provisioning(addr: &str, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<(), Error>
     {
         let mut payload = Vec::<u8>::new();
         ciborium::ser::into_writer(tree, &mut payload).expect("Could not serialize payload");
-        Self::post(addr, "prov", Some(ContentFormat::ApplicationCBOR), Some(payload)).await
+        let recv_packet = Self::post(addr, "prov", Some(ContentFormat::ApplicationCBOR), Some(payload)).await?;
+        Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Changed))
     }
         
     async fn init_search_services(srv_name: Option<&str>, srv_type: Option<&str>) -> Result<(UdpCoAPClient, MessageReceiver), Error> {
@@ -123,17 +129,13 @@ impl Coap {
         Self::send_multicast(&request).await
     }
 
-    async fn get_service(receiver: &mut MessageReceiver) -> Result<Option<Packet>, Error> {
+    async fn get_service(receiver: &mut MessageReceiver) -> Result<Option<coap::client::Packet>, Error> {
         if let Ok(recv_packet) = tokio::time::timeout(
             std::time::Duration::from_millis(2000),
             receiver.receive()).await {
                 let recv_packet = recv_packet?;
-                if recv_packet.message.header.code != MessageClass::Response(
-                        ResponseType::Content) {
-                    Err(Error::new(std::io::ErrorKind::InvalidData, format!("Unexpected reponse type: {}", recv_packet.message.header.get_code())))
-                } else {
-                    Ok(Some(recv_packet))
-                }
+                Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Content))?;
+                Ok(Some(recv_packet))
         } else {
             Ok(None)
         }
@@ -169,7 +171,7 @@ impl Coap {
         Ok(result)
     }
 
-    pub async fn provision(&self, addr: &str, key: &str, value: &Value) -> Result<CoapResponse, Error> {
+    pub async fn provision(&self, addr: &str, key: &str, value: &Value) -> Result<(), Error> {
         let tree = BTreeMap::from([
             (key, &value.0),
         ]);
@@ -177,7 +179,7 @@ impl Coap {
         Self::post_provisioning(&addr, &tree).await
     }
 
-    pub async fn reset_provisioning(&self, addr: &str, key: &str) -> Result<CoapResponse, Error> {
+    pub async fn reset_provisioning(&self, addr: &str, key: &str) -> Result<(), Error> {
         let reset_value = ciborium::value::Value::Text("".to_string());
         let tree = BTreeMap::from([
             (key, &reset_value),
@@ -186,7 +188,7 @@ impl Coap {
         Self::post_provisioning(&addr, &tree).await
     }
 
-    pub async fn get(&self, addr: &str, resource: &str, _payload_map: Option<&ciborium::value::Value>) -> Result<(), Error> {
+    pub async fn get(&self, addr: &str, resource: &str, _payload_map: Option<&ciborium::value::Value>) -> Result<Option<Content>, Error> {
         let url = format!("coap://[{}]/{}", addr, resource);
         let response = UdpCoAPClient::get(&url).await.unwrap();
         let payload = &response.message.payload;
@@ -200,31 +202,49 @@ impl Coap {
                         match cnt_fmt[..] {
                             [] => {
                                 let data = std::str::from_utf8(&payload).unwrap();
-                                println!("Data: {}", data);
+                                return Ok(Some(Content::PlainText(data.to_string())));
                             }
                             [60] => {
-                                let data : ciborium::value::Value = ciborium::de::from_reader(&payload[..]).unwrap();
-                                println!("Data: {:?}", data);
+                                let data = ciborium::de::from_reader(&payload[..]).unwrap();
+                                return Ok(Some(Content::Cbor(data)));
                             }
-                            _ => println!("Unknown content format"),
+                            [unexpected_cf] =>
+                                return Err(Error::new(std::io::ErrorKind::InvalidData,
+                                                      format!("Unexpected content format: {}",
+                                                              unexpected_cf))),
+                            _ => return Err(Error::new(std::io::ErrorKind::InvalidData,
+                                                       "Content format too long")),
                         }
                     }
                 }
-                _ => {}
+                _ => continue
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    pub async fn set(&self, addr: &str, resource: &str, payload_map: &ciborium::value::Value) -> Result<CoapResponse, Error> {
+    pub async fn set(&self, addr: &str, resource: &str, payload_map: &ciborium::value::Value) -> Result<(), Error> {
         let mut payload = Vec::<u8>::new();
         ciborium::ser::into_writer(&payload_map, &mut payload).expect("Could not serialize payload");
-        Self::post(addr, resource, Some(ContentFormat::ApplicationCBOR), Some(payload)).await
+        let recv_packet = Self::post(addr, resource, Some(ContentFormat::ApplicationCBOR), Some(payload)).await?;
+        Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Changed))
     }
 
-    pub async fn fota_req(&self, rmt_addr: &str, local_addr: &str) -> Result<CoapResponse, Error> {
+    pub async fn fota_req(&self, rmt_addr: &str, local_addr: &str) -> Result<(), Error> {
         let payload = format!("coap://{}/fota", local_addr);
-        Self::post(rmt_addr, "fota_req", Some(ContentFormat::TextPlain), Some(payload.into())).await
+        let recv_packet = Self::post(rmt_addr, "fota_req", Some(ContentFormat::TextPlain), Some(payload.into())).await?;
+        Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Changed))
+    }
+
+    fn response_type_is_expected(recv_packet: &Packet, expected_msg_class: &MessageClass) -> Result<(), Error> {
+        if &recv_packet.header.code == expected_msg_class {
+            Ok(())
+        } else {
+            Err(Error::new(std::io::ErrorKind::InvalidData,
+                           format!("Expected {} reponse type but received {}",
+                                   expected_msg_class,
+                                   recv_packet.header.get_code())))
+        }
     }
 }
