@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 #[derive(Parser,Debug)]
@@ -215,11 +216,11 @@ async fn main() {
 
         SubCommand::Provision(prov) => {
             let value = home_mng::Value::from_type_and_str(&prov.value_type.to_string(), &prov.value).unwrap();
-            let _ = coap.provision(&prov.addr, &prov.key, &value).await;
+            let _ = coap.provision(&get_socket_addr(&prov.addr), &prov.key, &value).await;
         }
 
         SubCommand::ResetProvisioning(prov) => {
-            let _ = coap.reset_provisioning(&prov.addr, &prov.key).await;
+            let _ = coap.reset_provisioning(&get_socket_addr(&prov.addr), &prov.key).await;
         }
 
         SubCommand::Get(data) => {
@@ -231,13 +232,14 @@ async fn main() {
                 payload_map = None;
             }
 
-            let _ = coap.get(&data.addr, &data.resource, payload_map.as_ref()).await;
+            let result = coap.get(&get_socket_addr(&data.addr), &data.resource, payload_map.as_ref()).await;
+            println!("{:?}", result);
         }
 
         SubCommand::Set(data) => {
             let data_map = encode_req_payload(data.key, data.value, data.keys, data.values, data.value_type);
 
-            let _ = coap.set(&data.addr, &data.resource, &data_map).await;
+            let _ = coap.set(&get_socket_addr(&data.addr), &data.resource, &data_map).await;
         }
 
         SubCommand::FotaReq(data) => {
@@ -257,7 +259,11 @@ async fn main() {
             let local_addr = local_addr_opt.expect("Local IPv6 address not found");
             let local_addr = format!("[{}]", local_addr);
 
-            let _ = coap.fota_req(&data.addr, &local_addr).await;
+            let _ = coap.fota_req(&get_socket_addr(&data.addr), &local_addr).await;
         }
     }
+}
+
+fn get_socket_addr(addr: &str) -> SocketAddr {
+    SocketAddr::new(IpAddr::from_str(addr).unwrap(), 5683)
 }

@@ -32,6 +32,7 @@ impl Value {
     }
 }
 
+#[derive(Debug)]
 pub enum Content {
     PlainText(String),
     Cbor(ciborium::value::Value),
@@ -77,12 +78,11 @@ impl Coap {
         Ok((client, receiver))
     }
 
-    async fn post(addr: &str, resource: &str, content_format: Option<ContentFormat>, payload: Option<Vec<u8>>) -> Result<CoapResponse, std::io::Error>{
+    async fn post(addr: &SocketAddr, resource: &str, content_format: Option<ContentFormat>, payload: Option<Vec<u8>>) -> Result<CoapResponse, std::io::Error>{
         let domain = addr;
-        let port = 5683;
         let path = resource;
 
-        let client = UdpCoAPClient::new_udp((domain, port)).await?;
+        let client = UdpCoAPClient::new_udp(addr).await?;
         let request = RequestBuilder::new(path, Method::Post)
             .domain(domain.to_string())
             .confirmable(true);
@@ -95,7 +95,7 @@ impl Coap {
         client.send(request).await
     }
 
-    async fn post_provisioning(addr: &str, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<(), Error>
+    async fn post_provisioning(addr: &SocketAddr, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<(), Error>
     {
         let mut payload = Vec::<u8>::new();
         ciborium::ser::into_writer(tree, &mut payload).expect("Could not serialize payload");
@@ -171,7 +171,7 @@ impl Coap {
         Ok(result)
     }
 
-    pub async fn provision(&self, addr: &str, key: &str, value: &Value) -> Result<(), Error> {
+    pub async fn provision(&self, addr: &SocketAddr, key: &str, value: &Value) -> Result<(), Error> {
         let tree = BTreeMap::from([
             (key, &value.0),
         ]);
@@ -179,7 +179,7 @@ impl Coap {
         Self::post_provisioning(&addr, &tree).await
     }
 
-    pub async fn reset_provisioning(&self, addr: &str, key: &str) -> Result<(), Error> {
+    pub async fn reset_provisioning(&self, addr: &SocketAddr, key: &str) -> Result<(), Error> {
         let reset_value = ciborium::value::Value::Text("".to_string());
         let tree = BTreeMap::from([
             (key, &reset_value),
@@ -188,8 +188,8 @@ impl Coap {
         Self::post_provisioning(&addr, &tree).await
     }
 
-    pub async fn get(&self, addr: &str, resource: &str, _payload_map: Option<&ciborium::value::Value>) -> Result<Option<Content>, Error> {
-        let url = format!("coap://[{}]/{}", addr, resource);
+    pub async fn get(&self, addr: &SocketAddr, resource: &str, _payload_map: Option<&ciborium::value::Value>) -> Result<Option<Content>, Error> {
+        let url = format!("coap://{}/{}", addr.to_string(), resource);
         let response = UdpCoAPClient::get(&url).await.unwrap();
         let payload = &response.message.payload;
 
@@ -224,14 +224,14 @@ impl Coap {
         Ok(None)
     }
 
-    pub async fn set(&self, addr: &str, resource: &str, payload_map: &ciborium::value::Value) -> Result<(), Error> {
+    pub async fn set(&self, addr: &SocketAddr, resource: &str, payload_map: &ciborium::value::Value) -> Result<(), Error> {
         let mut payload = Vec::<u8>::new();
         ciborium::ser::into_writer(&payload_map, &mut payload).expect("Could not serialize payload");
         let recv_packet = Self::post(addr, resource, Some(ContentFormat::ApplicationCBOR), Some(payload)).await?;
         Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Changed))
     }
 
-    pub async fn fota_req(&self, rmt_addr: &str, local_addr: &str) -> Result<(), Error> {
+    pub async fn fota_req(&self, rmt_addr: &SocketAddr, local_addr: &str) -> Result<(), Error> {
         let payload = format!("coap://{}/fota", local_addr);
         let recv_packet = Self::post(rmt_addr, "fota_req", Some(ContentFormat::TextPlain), Some(payload.into())).await?;
         Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Changed))
