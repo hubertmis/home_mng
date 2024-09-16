@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Error;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
@@ -8,6 +7,8 @@ use coap::client::{MessageReceiver, UdpCoAPClient};
 use coap::request::{CoapOption, Method, RequestBuilder};
 
 use socket2::{Socket, Domain, Type};
+
+pub type Error = std::io::Error;
 
 pub struct Value (
     ciborium::value::Value,
