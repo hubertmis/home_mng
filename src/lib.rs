@@ -80,13 +80,21 @@ impl Coap {
     }
 
     async fn post(addr: &SocketAddr, resource: &str, content_format: Option<ContentFormat>, payload: Option<Vec<u8>>) -> Result<CoapResponse, std::io::Error>{
+        Self::post_con_or_non(addr, resource, content_format, payload, true).await
+    }
+
+    async fn post_non_confirmable(addr: &SocketAddr, resource: &str, content_format: Option<ContentFormat>, payload: Option<Vec<u8>>) -> Result<CoapResponse, std::io::Error>{
+        Self::post_con_or_non(addr, resource, content_format, payload, false).await
+    }
+
+    async fn post_con_or_non(addr: &SocketAddr, resource: &str, content_format: Option<ContentFormat>, payload: Option<Vec<u8>>, con: bool) -> Result<CoapResponse, std::io::Error> {
         let domain = addr;
         let path = resource;
 
         let client = UdpCoAPClient::new_udp(addr).await?;
         let request = RequestBuilder::new(path, Method::Post)
             .domain(domain.to_string())
-            .confirmable(true);
+            .confirmable(con);
         let request = Self::set_content_format(request, content_format);
 
         let request = request
@@ -230,6 +238,13 @@ impl Coap {
         ciborium::ser::into_writer(&payload_map, &mut payload).expect("Could not serialize payload");
         let recv_packet = Self::post(addr, resource, Some(ContentFormat::ApplicationCBOR), Some(payload)).await?;
         Self::response_type_is_expected(&recv_packet.message, &MessageClass::Response(ResponseType::Changed))
+    }
+
+    pub async fn set_non_confirmable(&self, addr: &SocketAddr, resource: &str, payload_map: &ciborium::value::Value) -> Result<(), Error> {
+        let mut payload = Vec::<u8>::new();
+        ciborium::ser::into_writer(&payload_map, &mut payload).expect("Could not serialize payload");
+        Self::post_non_confirmable(addr, resource, Some(ContentFormat::ApplicationCBOR), Some(payload)).await?;
+        Ok(())
     }
 
     pub async fn fota_req(&self, rmt_addr: &SocketAddr, local_addr: &str) -> Result<(), Error> {

@@ -114,6 +114,8 @@ struct CoapSetter {
     values: Option<String>,
     #[clap(short='e')]
     exp_rsp: bool,
+    #[clap(long)]
+    non_confirmable: bool,
 }
 
 #[derive(Parser,Debug)]
@@ -238,8 +240,14 @@ async fn main() {
 
         SubCommand::Set(data) => {
             let data_map = encode_req_payload(data.key, data.value, data.keys, data.values, data.value_type);
+            let sock_addr = get_socket_addr(&data.addr);
+            let resource = &data.resource;
 
-            let _ = coap.set(&get_socket_addr(&data.addr), &data.resource, &data_map).await;
+            if data.non_confirmable {
+                let _ = coap.set_non_confirmable(&sock_addr, resource, &data_map).await;
+            } else {
+                let _ = coap.set(&sock_addr, resource, &data_map).await;
+            }
         }
 
         SubCommand::FotaReq(data) => {
