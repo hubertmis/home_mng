@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::str::FromStr;
 
 use coap_lite::{CoapRequest, CoapResponse, ContentFormat, MessageClass, Packet, ResponseType};
 use coap::client::{MessageReceiver, UdpCoAPClient};
@@ -9,29 +8,6 @@ use coap::request::{CoapOption, Method, RequestBuilder};
 use socket2::{Socket, Domain, Type};
 
 pub type Error = std::io::Error;
-
-pub struct Value (
-    ciborium::value::Value,
-);
-
-impl FromStr for Value {
-    type Err = clap::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Value(ciborium::value::Value::Text(s.to_string())))
-    }
-}
-
-impl Value {
-    pub fn from_type_and_str(t: &str, s: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        match t {
-            "int" => Ok(Value(ciborium::value::Value::Integer(s.parse::<i32>()?.try_into()?))),
-            "str" => Ok(Value(ciborium::value::Value::Text(s.to_string()))),
-            "bin" => Ok(Value(ciborium::value::Value::Bytes(Vec::new()))), // TODO! .chunks(), <u8>.from_str_radix??
-            "bool" => Ok(Value(ciborium::value::Value::Bool(s.parse::<bool>()?))),
-            _ => Err("Invalid value's type".into()),
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum Content {
@@ -104,7 +80,7 @@ impl Coap {
         client.send(request).await
     }
 
-    async fn post_provisioning(addr: &SocketAddr, tree: &BTreeMap<&str, &ciborium::value::Value>) -> Result<(), Error>
+    async fn post_provisioning(addr: &SocketAddr, tree: &ciborium::value::Value) -> Result<(), Error>
     {
         let mut payload = Vec::<u8>::new();
         ciborium::ser::into_writer(tree, &mut payload).expect("Could not serialize payload");
@@ -180,19 +156,14 @@ impl Coap {
         Ok(result)
     }
 
-    pub async fn provision(&self, addr: &SocketAddr, key: &str, value: &Value) -> Result<(), Error> {
-        let tree = BTreeMap::from([
-            (key, &value.0),
-        ]);
-
-        Self::post_provisioning(&addr, &tree).await
+    pub async fn provision(&self, addr: &SocketAddr, payload_map: &ciborium::value::Value) -> Result<(), Error> {
+        Self::post_provisioning(&addr, payload_map).await
     }
 
     pub async fn reset_provisioning(&self, addr: &SocketAddr, key: &str) -> Result<(), Error> {
+        let key = ciborium::value::Value::Text(key.to_string());
         let reset_value = ciborium::value::Value::Text("".to_string());
-        let tree = BTreeMap::from([
-            (key, &reset_value),
-        ]);
+        let tree = ciborium::value::Value::Map([(key, reset_value)].to_vec());
 
         Self::post_provisioning(&addr, &tree).await
     }

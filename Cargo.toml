@@ -15,6 +15,6 @@ futures = "0.3"
 tokio = {version = "^1.32", features = ["full"] }
 socket2 = "0.4"
 ciborium = "0.2"
-clap = { version = "3.0.0", features = ["derive"] }
+clap = { version = "4.5.0", features = ["derive"] }
 pnet = "0.28"
 ipnetwork = "0.18"
