@@ -15,6 +15,26 @@ pub enum Content {
     Cbor(ciborium::value::Value),
 }
 
+impl Content {
+    pub fn as_string(&self) -> Option<&String> {
+        match self {
+            Content::PlainText(string) => Some(string),
+            _ => None,
+        }
+    }
+
+    pub fn as_cbor(&self) -> Option<&ciborium::value::Value> {
+        match self {
+            Content::Cbor(cbor_value) => Some(cbor_value),
+            _ => None,
+        }
+    }
+
+    pub fn as_cbor_map(&self) -> Option<&Vec<(ciborium::value::Value, ciborium::value::Value)>> {
+        self.as_cbor()?.as_map()
+    }
+}
+
 pub struct Coap {
 }
 
