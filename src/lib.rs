@@ -146,6 +146,24 @@ impl Coap {
         }
     }
 
+    pub async fn service_discovery_single(&self, name: &str, srv_type: Option<&str>) -> Result<Option<(SocketAddr, Option<String>)>, Error> {
+        let (_client, mut receiver) = Self::init_search_services(Some(name), srv_type).await?;
+        while let Some(packet) = Self::get_service(&mut receiver).await? {
+            let data: BTreeMap<String, BTreeMap<String, String>> = ciborium::de::from_reader(&packet.message.payload[..]).unwrap();
+            let result = data.iter()
+                .find_map(|(service, details)| if service == name && packet.address.is_some() {
+                    Some((packet.address.unwrap(), details.get("type").map(|t| t.clone())))
+                } else {
+                    None
+                });
+
+            if result.is_some() {
+                return Ok(result);
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn service_discovery(&self, srv_name: Option<&str>, srv_type: Option<&str>) -> Result<Vec<(String, Option<String>, SocketAddr)>, Error> {
         let mut result = Vec::new();
         let (_client, mut receiver) = Self::init_search_services(srv_name, srv_type).await?;

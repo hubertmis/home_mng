@@ -60,6 +60,8 @@ struct SdFilter {
     service_name: Option<String>,
     #[clap(short = 't', long)]
     service_type: Option<String>,
+    #[clap(short, long)]
+    single: bool,
 }
 
 #[derive(Args,Debug)]
@@ -191,11 +193,16 @@ async fn main() {
 
     match opts.subcmd {
         SubCommand::ServiceDiscovery(sd_filter) => {
-            let result = coap.service_discovery(sd_filter.service_name.as_deref(), sd_filter.service_type.as_deref()).await;
+            if sd_filter.single {
+                let result = coap.service_discovery_single(&sd_filter.service_name.unwrap(), sd_filter.service_type.as_deref()).await;
+                println!("Discovery result: {:?}", result);
+            } else {
+                let result = coap.service_discovery(sd_filter.service_name.as_deref(), sd_filter.service_type.as_deref()).await;
 
-            if let Ok(services) = result {
-                for service in services {
-                    println!("{}: {:?}: {:?}", service.0, service.1, service.2);
+                if let Ok(services) = result {
+                    for service in services {
+                        println!("{}: {:?}: {:?}", service.0, service.1, service.2);
+                    }
                 }
             }
         }
