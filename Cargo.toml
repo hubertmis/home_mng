@@ -9,12 +9,12 @@ license = "MIT"
 # TODO: Create CLI feature and use dependencies only when needed
 
 [dependencies]
-coap = { git = "https://github.com/hubertmis/coap-rs.git", branch = "dev/home_mng" }
-coap-lite = "0.11.3"
-futures = "0.3"
-tokio = {version = "^1.32", features = ["full"] }
-socket2 = "0.4"
 ciborium = "0.2"
 clap = { version = "4.5.0", features = ["derive"] }
-pnet = "0.28"
+coap = "0.19"
+coap-lite = "0.11.3"
+futures = "0.3"
 ipnetwork = "0.18"
+pnet = "0.28"
+socket2 = "0.4"
+tokio = {version = "^1.32", features = ["full"] }
