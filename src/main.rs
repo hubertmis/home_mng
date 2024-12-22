@@ -4,14 +4,14 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-#[derive(Parser,Debug)]
+#[derive(Parser, Debug)]
 #[clap(version = "0.1", author = "Hubert Miś <hubert.mis@gmail.com>")]
 struct Opts {
     #[clap(subcommand)]
     subcmd: SubCommand,
 }
 
-#[derive(Subcommand,Debug)]
+#[derive(Subcommand, Debug)]
 enum SubCommand {
     ServiceDiscovery(SdFilter),
     NotProvisioned,
@@ -38,7 +38,10 @@ impl FromStr for ValType {
             "str" => Ok(ValType::StringType),
             "bin" => Ok(ValType::BinType),
             "bool" => Ok(ValType::BoolType),
-            _ => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue, "Unknown value type. Use int, str, or bin")),
+            _ => Err(clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                "Unknown value type. Use int, str, or bin",
+            )),
         }
     }
 }
@@ -50,11 +53,12 @@ impl ToString for ValType {
             ValType::IntType => "int",
             ValType::BinType => "bin",
             ValType::BoolType => "bool",
-        }.to_string()
+        }
+        .to_string()
     }
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct SdFilter {
     #[clap(short = 'n', long)]
     service_name: Option<String>,
@@ -64,7 +68,7 @@ struct SdFilter {
     single: bool,
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct Prov {
     #[clap(short, long)]
     addr: String,
@@ -72,7 +76,7 @@ struct Prov {
     req_payload: RequestPayload,
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct ProvKey {
     #[clap(short, long)]
     addr: String,
@@ -80,7 +84,7 @@ struct ProvKey {
     key: String,
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct CoapGetter {
     #[clap(short, long)]
     addr: String,
@@ -90,7 +94,7 @@ struct CoapGetter {
     req_payload: RequestPayload,
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct CoapSetter {
     #[clap(short, long)]
     addr: String,
@@ -98,19 +102,19 @@ struct CoapSetter {
     resource: String,
     #[clap(flatten)]
     req_payload: RequestPayload,
-    #[clap(short='e')]
+    #[clap(short = 'e')]
     exp_rsp: bool,
     #[clap(long)]
     non_confirmable: bool,
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct RequestPayload {
-    #[arg(short, long, requires="value")]
+    #[arg(short, long, requires = "value")]
     key: Option<String>,
-    #[arg(short, long, requires="key")]
+    #[arg(short, long, requires = "key")]
     value: Option<String>,
-    #[clap(short='t', default_value = "str", requires="value")]
+    #[clap(short = 't', default_value = "str", requires = "value")]
     value_type: ValType,
     #[arg(long, conflicts_with_all=["key","value"])]
     hexstring: bool,
@@ -136,20 +140,22 @@ impl TryFrom<RequestPayload> for ciborium::value::Value {
                 .map_err(|e| Self::Error::Custom(e.to_string()))
         } else if let (Some(key), Some(value)) = (req_payload.key, req_payload.value) {
             match req_payload.value_type {
-                ValType::StringType => {
-                    Ok(ciborium::value::Value::Map([(
-                          ciborium::value::Value::Text(key),
-                          ciborium::value::Value::Text(value))].to_vec()))
-                }
-                ValType::IntType => {
-                    Ok(ciborium::value::Value::Map([(
-                            ciborium::value::Value::Text(key),
-                            ciborium::value::Value::Integer(
-                                ciborium::value::Integer::from(
-                                    value.parse::<i32>().unwrap()
-                                )
-                            ))].to_vec()))
-                }
+                ValType::StringType => Ok(ciborium::value::Value::Map(
+                    [(
+                        ciborium::value::Value::Text(key),
+                        ciborium::value::Value::Text(value),
+                    )]
+                    .to_vec(),
+                )),
+                ValType::IntType => Ok(ciborium::value::Value::Map(
+                    [(
+                        ciborium::value::Value::Text(key),
+                        ciborium::value::Value::Integer(ciborium::value::Integer::from(
+                            value.parse::<i32>().unwrap(),
+                        )),
+                    )]
+                    .to_vec(),
+                )),
                 ValType::BinType => {
                     let bin_vec = value
                         .chars()
@@ -159,26 +165,31 @@ impl TryFrom<RequestPayload> for ciborium::value::Value {
                         .map(|c| u8::from_str_radix(&c, 16).unwrap())
                         .collect::<Vec<u8>>();
 
-                    Ok(ciborium::value::Value::Map([(
+                    Ok(ciborium::value::Value::Map(
+                        [(
                             ciborium::value::Value::Text(key),
-                            ciborium::value::Value::Bytes(bin_vec)
-                            )].to_vec()))
+                            ciborium::value::Value::Bytes(bin_vec),
+                        )]
+                        .to_vec(),
+                    ))
                 }
-                ValType::BoolType => {
-                    Ok(ciborium::value::Value::Map([(
-                            ciborium::value::Value::Text(key),
-                            ciborium::value::Value::Bool(
-                                value.parse::<bool>().unwrap()
-                            ))].to_vec()))
-                }
+                ValType::BoolType => Ok(ciborium::value::Value::Map(
+                    [(
+                        ciborium::value::Value::Text(key),
+                        ciborium::value::Value::Bool(value.parse::<bool>().unwrap()),
+                    )]
+                    .to_vec(),
+                )),
             }
         } else {
-            Err(Self::Error::Custom("Missing data in the passed structure".to_string()))
+            Err(Self::Error::Custom(
+                "Missing data in the passed structure".to_string(),
+            ))
         }
     }
 }
 
-#[derive(Args,Debug)]
+#[derive(Args, Debug)]
 struct CoapFotaReq {
     #[clap(short, long)]
     addr: String,
@@ -194,10 +205,20 @@ async fn main() {
     match opts.subcmd {
         SubCommand::ServiceDiscovery(sd_filter) => {
             if sd_filter.single {
-                let result = coap.service_discovery_single(&sd_filter.service_name.unwrap(), sd_filter.service_type.as_deref()).await;
+                let result = coap
+                    .service_discovery_single(
+                        &sd_filter.service_name.unwrap(),
+                        sd_filter.service_type.as_deref(),
+                    )
+                    .await;
                 println!("Discovery result: {:?}", result);
             } else {
-                let result = coap.service_discovery(sd_filter.service_name.as_deref(), sd_filter.service_type.as_deref()).await;
+                let result = coap
+                    .service_discovery(
+                        sd_filter.service_name.as_deref(),
+                        sd_filter.service_type.as_deref(),
+                    )
+                    .await;
 
                 if let Ok(services) = result {
                     for service in services {
@@ -212,30 +233,48 @@ async fn main() {
         }
 
         SubCommand::Provision(prov) => {
-            let data_map = prov.req_payload.try_into().expect("Missing data to provision. Check command line arguments");
+            let data_map = prov
+                .req_payload
+                .try_into()
+                .expect("Missing data to provision. Check command line arguments");
 
-            let _ = coap.provision(&get_socket_addr(&prov.addr), &data_map).await;
+            let _ = coap
+                .provision(&get_socket_addr(&prov.addr), &data_map)
+                .await;
         }
 
         SubCommand::ResetProvisioning(prov) => {
-            let _ = coap.reset_provisioning(&get_socket_addr(&prov.addr), &prov.key).await;
+            let _ = coap
+                .reset_provisioning(&get_socket_addr(&prov.addr), &prov.key)
+                .await;
         }
 
         SubCommand::Get(data) => {
             let payload_map = data.req_payload.try_into().ok();
 
-            let result = coap.get(&get_socket_addr(&data.addr), &data.resource, payload_map.as_ref()).await;
+            let result = coap
+                .get(
+                    &get_socket_addr(&data.addr),
+                    &data.resource,
+                    payload_map.as_ref(),
+                )
+                .await;
             println!("{:?}", result);
         }
 
         SubCommand::Set(data) => {
-            let data_map = data.req_payload.try_into().expect("Missing data to set. Check command line arguments");
+            let data_map = data
+                .req_payload
+                .try_into()
+                .expect("Missing data to set. Check command line arguments");
 
             let sock_addr = get_socket_addr(&data.addr);
             let resource = &data.resource;
 
             if data.non_confirmable {
-                let _ = coap.set_non_confirmable(&sock_addr, resource, &data_map).await;
+                let _ = coap
+                    .set_non_confirmable(&sock_addr, resource, &data_map)
+                    .await;
             } else {
                 let _ = coap.set(&sock_addr, resource, &data_map).await;
             }
@@ -258,7 +297,9 @@ async fn main() {
             let local_addr = local_addr_opt.expect("Local IPv6 address not found");
             let local_addr = format!("[{}]", local_addr);
 
-            let _ = coap.fota_req(&get_socket_addr(&data.addr), &local_addr).await;
+            let _ = coap
+                .fota_req(&get_socket_addr(&data.addr), &local_addr)
+                .await;
         }
     }
 }
