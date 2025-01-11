@@ -229,7 +229,8 @@ async fn main() {
         }
 
         SubCommand::NotProvisioned => {
-            let _ = coap.not_provisioned_discovery().await;
+            let result = coap.not_provisioned_discovery().await;
+            println!("{:?}", result);
         }
 
         SubCommand::Provision(prov) => {
